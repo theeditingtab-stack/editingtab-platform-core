@@ -4,10 +4,12 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect, text
+from sqlalchemy import DateTime, inspect, text
+from sqlalchemy.orm import Session
 
 from editingtab_core.app import create_app
-from editingtab_core.identity.models import Base
+from editingtab_core.identity import services as identity
+from editingtab_core.identity.models import Base, User
 
 pytestmark = pytest.mark.integration
 
@@ -34,9 +36,26 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
     )
     assert inspect(connection).get_table_names(schema=schema) == ["alembic_version"]
 
+    command.upgrade(migration_config, "0002_core_identity")
+    assert (
+        connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0002_core_identity"
+    )
+    assert set(inspect(connection).get_table_names(schema=schema)) == {
+        "alembic_version",
+        "core_users",
+        "core_organizations",
+        "core_memberships",
+    }
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        existing_id = identity.create_user(
+            session, email="preserved@example.test", display_name="Preserved"
+        )
     command.upgrade(migration_config, "head")
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        assert session.get(User, existing_id).email == "preserved@example.test"
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0002_core_identity"
+    assert expected_head == "0003_password_sessions"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -53,9 +72,13 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
     for table in Base.metadata.tables:
         columns = {column["name"]: column for column in inspector.get_columns(table, schema=schema)}
         assert set(columns) == set(Base.metadata.tables[table].columns.keys())
-        for field in ("created_at", "updated_at", "deleted_at"):
-            assert columns[field]["type"].timezone is True
-        assert inspector.get_pk_constraint(table, schema=schema)["constrained_columns"] == ["id"]
+        model = Base.metadata.tables[table]
+        for column in model.columns:
+            if isinstance(column.type, DateTime):
+                assert columns[column.name]["type"].timezone is True
+        assert inspector.get_pk_constraint(table, schema=schema)["constrained_columns"] == list(
+            model.primary_key.columns.keys()
+        )
     constraints = inspector.get_unique_constraints("core_memberships", schema=schema)
     assert any(row["column_names"] == ["organization_id", "user_id"] for row in constraints)
     assert all(

@@ -53,3 +53,5 @@ Core and Booking have a two-week planning target. Estimates depend on scope deci
 ## Current checkpoint state
 
 CORE-002 provides the backend foundation; the user reports that its local checks and GitHub Actions passed. CORE-003 adds internal organization, user, and membership persistence, with scoped queries, reserved uniqueness, and soft deletion. See [CORE-003 identity](core-003-identity.md) for policies and verification. Persistence scoping does not provide authentication or authorization. Other requirements above remain future work; no public management endpoints exist.
+
+CORE-004 adds password authentication with revocable server-side sessions, Origin-based CSRF protection, shared PostgreSQL login throttling, and explicit local-only provisioning. See [authentication details](core-004-authentication.md). Authorization and public organization management remain future work; none of the product requirements above have been removed.

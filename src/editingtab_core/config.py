@@ -3,8 +3,9 @@
 import ipaddress
 import re
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -30,6 +31,40 @@ class Settings(BaseSettings):
     db_username: str = Field(default="editingtab_dev", min_length=1, max_length=63)
     db_password: SecretStr = Field(repr=False, exclude=True)
     db_connect_timeout: int = Field(default=3, ge=2, le=10)
+
+    auth_allowed_origins: tuple[str, ...] = ()
+    auth_session_seconds: int = Field(default=28800, ge=60, le=604800)
+    auth_window_seconds: int = Field(default=300, ge=1, le=3600)
+    auth_account_limit: int = Field(default=5, ge=1, le=100)
+    auth_source_limit: int = Field(default=30, ge=1, le=1000)
+
+    @property
+    def auth_secure_cookie(self) -> bool:
+        # An omitted environment must never silently enable insecure cookies.
+        return not (
+            self.environment in {"development", "test"} and "environment" in self.model_fields_set
+        )
+
+    @model_validator(mode="after")
+    def valid_origins(self):
+        for origin in self.auth_allowed_origins:
+            parsed = urlsplit(origin)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or origin != f"{parsed.scheme}://{parsed.netloc}"
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+                or "*" in origin
+                or any(ord(c) <= 32 for c in origin)
+                or (self.auth_secure_cookie and parsed.scheme != "https")
+            ):
+                raise ValueError("Use exact HTTP(S) origins; secure mode requires HTTPS.")
+            _ = parsed.port
+        return self
 
     @field_validator("db_host")
     @classmethod

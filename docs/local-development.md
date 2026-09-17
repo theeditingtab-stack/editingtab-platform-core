@@ -23,7 +23,7 @@ uv run --locked python scripts/init-dev.py
 
 The initializer securely generates a local development password, creates `.env` exclusively, never prints its password, and never overwrites an existing file. `.env.example` documents non-secret placeholders; copying its placeholder password without replacing it will fail application validation. `.env`, virtual environments, caches, and local editor files are ignored. Do not display resolved Compose configuration or commit credentials.
 
-Settings use `CORE_`: `ENVIRONMENT` (development/test/production), `SERVICE_NAME`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_CONNECT_TIMEOUT` (integer seconds, 2–10; default 3). Environment variables override `.env`. The local Compose development database/user are fixed at `editingtab_core` / `editingtab_dev`; application settings support other deployments.
+Settings use `CORE_`: `ENVIRONMENT` (development/test/production), `SERVICE_NAME`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_CONNECT_TIMEOUT` (integer seconds, 2â€“10; default 3). Environment variables override `.env`. The local Compose development database/user are fixed at `editingtab_core` / `editingtab_dev`; application settings support other deployments.
 
 ## Start development PostgreSQL and migrate (manual opt-in)
 
@@ -45,14 +45,16 @@ uv run --locked alembic upgrade head
 
 Use a free port, keep the internal container port at 5432, and keep application/Compose settings consistent. Changing an environment password does not rotate the password already stored in PostgreSQL; preserve the original local secret and do not reset data to fix credentials.
 
-Revision `0001_foundation` is intentionally empty. The new head, `0002_core_identity`, adds Core organizations, users, and memberships. Review it before manually running the development upgrade above; Codex did not apply it to development during CORE-003. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
+Revision `0001_foundation` is intentionally empty. Revision `0002_core_identity` adds Core organizations, users, and memberships; new head `0003_password_sessions` adds credentials, sessions, and login throttles. Review it before manually running the development upgrade above; Codex did not apply it to development during CORE-004. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
 
 ## Start and check the API
 
 Use an available API port; 18080 was used for checkpoint verification because 8000 was occupied.
 
 ```powershell
-uv run --locked uvicorn editingtab_core.app:create_app --factory --host 127.0.0.1 --port 18080
+$env:CORE_ENVIRONMENT = 'development'
+$env:CORE_AUTH_ALLOWED_ORIGINS = '["http://127.0.0.1:18080"]'
+uv run --locked uvicorn editingtab_core.app:create_app --factory --host 127.0.0.1 --port 18080 --no-proxy-headers
 ```
 
 In another project-root PowerShell terminal:
@@ -90,6 +92,10 @@ $env:CORE_TEST_DB_PORT = '25433'
 
 The runner defaults to 15433; pass the same overridden port explicitly. Tests reject nonlocal hosts, incorrect database/user names, and development port 15432; they never fall back to development settings. They create private schemas inside rollback-only outer transactions, verify actual database/user identity before DDL, and leave existing schemas untouched. Service commits and failures use real PostgreSQL savepoints. No database resets or downgrades run; tests intentionally verify that restrictive foreign keys reject parent hard deletion. Enabled integration tests fail if configuration is missing or PostgreSQL is unavailable. They verify baseline-to-head migration, repeated upgrade, constraints, scoped identity services, rollback, and real readiness. See [CORE-003 identity](core-003-identity.md) for policies and results.
 
+## Authentication demo
+
+See [CORE-004 authentication](core-004-authentication.md) for cookie/origin configuration, secure local user provisioning, and complete login, profile, logout, and revoked-cookie replay commands. No account is created automatically. Authentication grants no tenant permissions.
+
 ## Outage check and stopping
 
 With the API still running, stop only this project's development database, then restore it even if a check fails:
@@ -109,7 +115,7 @@ try {
 Invoke-RestMethod http://127.0.0.1:18080/health/ready
 ```
 
-Expect liveness 200 throughout and readiness 200 → 503 → 200 without restarting the API. Stop the API with Ctrl+C. Stop project databases without deleting the persistent development data:
+Expect liveness 200 throughout and readiness 200 â†’ 503 â†’ 200 without restarting the API. Stop the API with Ctrl+C. Stop project databases without deleting the persistent development data:
 
 ```powershell
 docker compose --profile test stop db db-test
