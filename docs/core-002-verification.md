@@ -1,6 +1,6 @@
 # CORE-002 verification
 
-Verified locally on 2026-09-17. Scope is the backend foundation only; future Core and Booking features remain unimplemented.
+Historical checkpoint record: verified locally on 2026-09-17. The user subsequently reported successful manual verification and CORE-002 GitHub Actions. The execution/state statements below describe the original CORE-002 run; see [CORE-003 identity](core-003-identity.md) for the current checkpoint. Scope is the backend foundation only; future Core and Booking features remain unimplemented.
 
 ## Files and local artifacts
 

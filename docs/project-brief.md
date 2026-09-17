@@ -52,4 +52,4 @@ Core and Booking have a two-week planning target. Estimates depend on scope deci
 
 ## Current checkpoint state
 
-CORE-002 implements only backend configuration, lifecycle, connectivity, migrations, health endpoints, tests, linting, and CI configuration. Domain requirements above remain future work. See [CORE-002 verification](core-002-verification.md) for executed checks and limitations; GitHub Actions has not run.
+CORE-002 provides the backend foundation; the user reports that its local checks and GitHub Actions passed. CORE-003 adds internal organization, user, and membership persistence, with scoped queries, reserved uniqueness, and soft deletion. See [CORE-003 identity](core-003-identity.md) for policies and verification. Persistence scoping does not provide authentication or authorization. Other requirements above remain future work; no public management endpoints exist.

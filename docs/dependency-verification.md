@@ -40,4 +40,4 @@ With AnyIO 4.15.1, Starlette's test client used a deprecated `BlockingPortal` al
 - [GitHub PostgreSQL service containers](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-postgresql-service-containers): isolated CI database.
 - [PyPI metadata API](https://docs.pypi.org/api/json/): release versions, Python requirements, and yanked status. Queries used each package's `https://pypi.org/pypi/<package>/json` endpoint, plus the exact AnyIO 4.14.2 endpoint.
 
-CI pins the official checkout and setup-uv actions by full commit SHA from current uv guidance. It uses read-only repository permissions, no persisted checkout credentials, and disposable database credentials. A real GitHub Actions run remains pending the user's manual push.
+CI pins the official checkout and setup-uv actions by full commit SHA from current uv guidance. It uses read-only repository permissions, no persisted checkout credentials, and disposable database credentials. The user subsequently reported successful CORE-002 GitHub Actions verification. CORE-003 adds no dependencies; its new tests await a separate remote workflow run after the user's manual push.

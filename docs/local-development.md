@@ -25,7 +25,7 @@ The initializer securely generates a local development password, creates `.env` 
 
 Settings use `CORE_`: `ENVIRONMENT` (development/test/production), `SERVICE_NAME`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_CONNECT_TIMEOUT` (integer seconds, 2–10; default 3). Environment variables override `.env`. The local Compose development database/user are fixed at `editingtab_core` / `editingtab_dev`; application settings support other deployments.
 
-## Start development PostgreSQL and migrate
+## Start development PostgreSQL and migrate (manual opt-in)
 
 ```powershell
 ./scripts/start-db.ps1
@@ -45,7 +45,7 @@ uv run --locked alembic upgrade head
 
 Use a free port, keep the internal container port at 5432, and keep application/Compose settings consistent. Changing an environment password does not rotate the password already stored in PostgreSQL; preserve the original local secret and do not reset data to fix credentials.
 
-Revision `0001_foundation` is intentionally empty. Only `alembic_version` is created. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
+Revision `0001_foundation` is intentionally empty. The new head, `0002_core_identity`, adds Core organizations, users, and memberships. Review it before manually running the development upgrade above; Codex did not apply it to development during CORE-003. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
 
 ## Start and check the API
 
@@ -88,7 +88,7 @@ $env:CORE_TEST_DB_PORT = '25433'
 ./scripts/test-integration.ps1 -Port 25433
 ```
 
-The runner defaults to 15433; pass the same overridden port explicitly. Tests reject nonlocal hosts, incorrect database/user names, and development port 15432; they never fall back to development settings. They run no drops, resets, or downgrades. Enabled integration tests fail if configuration is missing or PostgreSQL is unavailable. They verify actual connectivity, PostgreSQL 17, upgrade to head, current revision, repeat upgrade, and real readiness.
+The runner defaults to 15433; pass the same overridden port explicitly. Tests reject nonlocal hosts, incorrect database/user names, and development port 15432; they never fall back to development settings. They create private schemas inside rollback-only outer transactions, verify actual database/user identity before DDL, and leave existing schemas untouched. Service commits and failures use real PostgreSQL savepoints. No database resets or downgrades run; tests intentionally verify that restrictive foreign keys reject parent hard deletion. Enabled integration tests fail if configuration is missing or PostgreSQL is unavailable. They verify baseline-to-head migration, repeated upgrade, constraints, scoped identity services, rollback, and real readiness. See [CORE-003 identity](core-003-identity.md) for policies and results.
 
 ## Outage check and stopping
 
