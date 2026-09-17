@@ -6,6 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 import editingtab_core.auth.models  # noqa: F401
 import editingtab_core.authorization.models  # noqa: F401
+import editingtab_core.platform.models  # noqa: F401
 from editingtab_core.config import load_settings
 from editingtab_core.database import build_engine
 from editingtab_core.identity.models import Base

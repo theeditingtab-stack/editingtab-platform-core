@@ -45,7 +45,7 @@ uv run --locked alembic upgrade head
 
 Use a free port, keep the internal container port at 5432, and keep application/Compose settings consistent. Changing an environment password does not rotate the password already stored in PostgreSQL; preserve the original local secret and do not reset data to fix credentials.
 
-Revision `0001_foundation` is intentionally empty. Revision `0002_core_identity` adds Core organizations, users, and memberships; `0003_password_sessions` adds credentials, sessions, and login throttles. New head `0004_organization_roles` adds organization roles, scoped assignments, and audit records. Review it before manually running the development upgrade above; Codex did not apply it to development during CORE-005. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
+Revision `0001_foundation` is intentionally empty. Revision `0002_core_identity` adds Core organizations, users, and memberships; `0003_password_sessions` adds credentials, sessions, and login throttles. `0004_organization_roles` adds organization roles, scoped assignments, and audit records. New head `0005_platform_onboarding` adds separate platform authority, bootstrap history, entitlements, and platform audit. Review it before manually upgrading development; Codex did not apply CORE-006 to development. See the [eight-step platform walkthrough](core-006-platform.md#manual-powershell-walkthrough). Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
 
 ## Start and check the API
 

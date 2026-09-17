@@ -4,12 +4,15 @@ import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
-from sqlalchemy import DateTime, inspect, text
+from sqlalchemy import DateTime, inspect, select, text
 from sqlalchemy.orm import Session
 
 from editingtab_core.app import create_app
 from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.security import Passwords
+from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
+from editingtab_core.authorization.onboarding import _create_owned_organization
+from editingtab_core.authorization.policy import OWNER_PERMISSIONS
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
 
@@ -64,8 +67,34 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     password_hash=Passwords().hash("synthetic preserved password"),
                 )
             )
+    command.upgrade(migration_config, "0004_organization_roles")
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        with session.begin():
+            owned_id = _create_owned_organization(
+                session,
+                name="Preserved roles",
+                slug="preserved-roles",
+                owner_id=existing_id,
+                actor_id=existing_id,
+            ).id
+            role_id = session.scalar(select(Role.id).where(Role.organization_id == owned_id))
     command.upgrade(migration_config, "head")
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        assert session.get(Role, role_id).organization_id == owned_id
+        assert (
+            session.scalar(
+                select(MembershipRole.role_id).where(MembershipRole.organization_id == owned_id)
+            )
+            == role_id
+        )
+        assert (
+            set(
+                session.scalars(
+                    select(RolePermission.code).where(RolePermission.role_id == role_id)
+                )
+            )
+            == OWNER_PERMISSIONS
+        )
         assert session.get(User, existing_id).email == "preserved@example.test"
         assert session.get(Membership, member_id).user_id == existing_id
         assert Passwords().verify(
@@ -73,7 +102,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0004_organization_roles"
+    assert expected_head == "0005_platform_onboarding"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)

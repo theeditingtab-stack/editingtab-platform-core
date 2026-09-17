@@ -1,5 +1,7 @@
 # CORE-005: Organization roles and enforced permissions
 
+Historical checkpoint handoff. The user subsequently verified the manual walkthrough and GitHub Actions at `586b66b`. CORE-006 adds separate platform authority, onboarding, and entitlements; use the [current platform walkthrough](core-006-platform.md) for the new migration and operator setup. The CORE-005-specific results and limitations below describe that earlier checkpoint.
+
 The Editing Tab now exposes a small organization API protected by existing revocable sessions. Core owns roles, grants, and audit records. Starting commit: `aedfa62` (user-verified CORE-004). No platform administration, onboarding UI, module entitlements, Booking, frontend, or deployment is implemented here.
 
 ## Policy and storage

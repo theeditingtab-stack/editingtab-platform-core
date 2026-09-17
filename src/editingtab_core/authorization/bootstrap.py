@@ -6,10 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from editingtab_core.auth.provision import SafeParser, require_local
-from editingtab_core.authorization import repository as repo
-from editingtab_core.authorization.models import MembershipRole, Role
+from editingtab_core.authorization.onboarding import _create_owned_organization
 from editingtab_core.authorization.policy import (
-    OWNER_PERMISSIONS,
     AccessError,
     Conflict,
     Inaccessible,
@@ -17,7 +15,6 @@ from editingtab_core.authorization.policy import (
 from editingtab_core.authorization.services import transaction
 from editingtab_core.config import load_settings
 from editingtab_core.database import build_engine
-from editingtab_core.identity import repository as identity
 from editingtab_core.identity.errors import IdentityError
 from editingtab_core.identity.models import Organization, User
 from editingtab_core.identity.normalization import clean_name, normalize_email, normalize_slug
@@ -43,22 +40,9 @@ def bootstrap(session, *, settings, email, slug, name):
         )
         if user is None:
             raise Inaccessible()
-        org = identity.create_organization(session, name=name, slug=slug)
-        member = identity.create_membership(session, organization_id=org.id, user_id=user.id)
-        role = Role(
-            organization_id=org.id, name="Organization owner", normalized_name="organization owner"
-        )
-        session.add(role)
-        session.flush()
-        repo.replace_permissions(session, org.id, role.id, OWNER_PERMISSIONS)
-        session.add(
-            MembershipRole(organization_id=org.id, membership_id=member.id, role_id=role.id)
-        )
-        repo.audit(session, org.id, user.id, "role.bootstrapped", role.id, [], OWNER_PERMISSIONS)
-        repo.audit(
-            session, org.id, user.id, "assignment.added", role.id, [], OWNER_PERMISSIONS, member.id
-        )
-        return org.id
+        return _create_owned_organization(
+            session, name=name, slug=slug, owner_id=user.id, actor_id=user.id
+        ).id
 
 
 def main():

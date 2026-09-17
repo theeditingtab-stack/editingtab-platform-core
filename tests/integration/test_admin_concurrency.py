@@ -152,3 +152,71 @@ def test_concurrent_removal_cannot_remove_both_administrators(
             ).scalar_one()
             == 1
         )
+
+
+def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
+    integration_engine, shared_schema
+):
+    from editingtab_core.platform import services as platform
+
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        for name in ("first", "second"):
+            identity.create_user(session, email=f"{name}@example.test", display_name=name)
+    pids = Queue()
+
+    def attempt(name):
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.commit()
+            pids.put(pid)
+            with Session(connection) as session:
+                try:
+                    platform.bootstrap_initial(session, email=f"{name}@example.test")
+                    return "granted"
+                except platform.BootstrapClosed:
+                    return "closed"
+
+    with scoped_connection(integration_engine, shared_schema) as gate:
+        gate.execute(text("SELECT id FROM core_platform_bootstrap WHERE id = 1 FOR UPDATE"))
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(attempt, name) for name in ("first", "second")]
+            try:
+                worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
+                deadline = time.monotonic() + 2
+                with integration_engine.connect() as observer:
+                    while True:
+                        waiting = [
+                            observer.scalar(
+                                text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), {"pid": pid}
+                            )
+                            for pid in worker_pids
+                        ]
+                        if all(waiting):
+                            break
+                        assert time.monotonic() < deadline, (
+                            "Bootstrap workers did not reach concurrent locks"
+                        )
+                        time.sleep(0.01)
+            finally:
+                gate.rollback()
+            assert sorted(f.result(timeout=5) for f in futures) == ["closed", "granted"]
+    with scoped_connection(integration_engine, shared_schema) as connection:
+        assert connection.scalar(text("SELECT count(*) FROM core_platform_admin_grants")) == 1
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM core_platform_audit "
+                    "WHERE action = 'operator.bootstrap' AND actor_id IS NULL"
+                )
+            )
+            == 1
+        )
+        assert (
+            connection.scalar(
+                text("SELECT completed_at IS NOT NULL FROM core_platform_bootstrap WHERE id = 1")
+            )
+            is True
+        )
