@@ -1,0 +1,118 @@
+# Local development (Windows PowerShell)
+
+Run commands from the project root in VS Code or PowerShell. Docker Desktop must be running with Linux containers. The application uses Python 3.12; an existing Python interpreter may bootstrap uv. Nothing here initializes Git or changes GitHub.
+
+## Prepare the environment
+
+If uv is not installed, install it in a workspace-local bootstrap virtual environment:
+
+```powershell
+python -m venv .tools/bootstrap
+& ./.tools/bootstrap/Scripts/python.exe -m pip --isolated --disable-pip-version-check --no-cache-dir install uv==0.12.15
+```
+
+Use the following in each new shell. The helper keeps uv's cache and managed Python installation inside the workspace and makes the local uv executable available if installed above:
+
+```powershell
+. ./scripts/use-tools.ps1
+uv python install 3.12
+uv sync --locked
+uv run --locked python --version
+uv run --locked python scripts/init-dev.py
+```
+
+The initializer securely generates a local development password, creates `.env` exclusively, never prints its password, and never overwrites an existing file. `.env.example` documents non-secret placeholders; copying its placeholder password without replacing it will fail application validation. `.env`, virtual environments, caches, and local editor files are ignored. Do not display resolved Compose configuration or commit credentials.
+
+Settings use `CORE_`: `ENVIRONMENT` (development/test/production), `SERVICE_NAME`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, and `DB_CONNECT_TIMEOUT` (integer seconds, 2–10; default 3). Environment variables override `.env`. The local Compose development database/user are fixed at `editingtab_core` / `editingtab_dev`; application settings support other deployments.
+
+## Start development PostgreSQL and migrate
+
+```powershell
+./scripts/start-db.ps1
+uv run --locked alembic upgrade head
+uv run --locked alembic current
+```
+
+The helper checks resource ownership and host-port conflicts before starting `db` under Compose project `editingtab-core-dev`. It never stops unrelated services. If a conflict is reported, choose a free port; do not delete volumes or stop unrelated containers.
+
+Development binds `127.0.0.1:15432` to container port `5432` and persists data in `editingtab-core-dev_core_postgres_data`. Set `CORE_DB_PORT` in `.env` before startup, or use an explicit PowerShell override in the same shell used for migrations/API:
+
+```powershell
+$env:CORE_DB_PORT = '25432'
+./scripts/start-db.ps1
+uv run --locked alembic upgrade head
+```
+
+Use a free port, keep the internal container port at 5432, and keep application/Compose settings consistent. Changing an environment password does not rotate the password already stored in PostgreSQL; preserve the original local secret and do not reset data to fix credentials.
+
+Revision `0001_foundation` is intentionally empty. Only `alembic_version` is created. Startup neither creates tables nor runs migrations. Repeating `upgrade head` is safe; do not downgrade or reset development data.
+
+## Start and check the API
+
+Use an available API port; 18080 was used for checkpoint verification because 8000 was occupied.
+
+```powershell
+uv run --locked uvicorn editingtab_core.app:create_app --factory --host 127.0.0.1 --port 18080
+```
+
+In another project-root PowerShell terminal:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:18080/health/live
+Invoke-RestMethod http://127.0.0.1:18080/health/ready
+```
+
+Liveness returns HTTP 200 with `{"status":"alive"}` without database access. Readiness executes `SELECT 1` and returns HTTP 200 with `{"status":"ready"}` or HTTP 503 with `{"status":"unavailable"}`. Errors reveal no connection details. Database work runs in worker threads, sessions close reliably, and the engine is disposed at application shutdown. No permissive CORS or debug mode is enabled.
+
+Connection and pool waits use the configured timeout; queries have a matching PostgreSQL statement timeout, with TCP failure settings as additional protection. These are component timeouts, not an unconditional end-to-end network deadline: DNS, retries, and operating-system behavior can add delay. Local outage behavior was measured; production timeout policy remains deployment work.
+
+## Checks and isolated integration tests
+
+```powershell
+. ./scripts/use-tools.ps1
+uv sync --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest -m 'not integration'
+./scripts/start-db.ps1 -TestDatabase
+./scripts/test-integration.ps1
+```
+
+Unit checks include the database configuration guard tests; no database is required. Real integration tests are marked `integration` and require `--integration` plus every explicit `CORE_TEST_DB_` setting. The test helper sets host, port, name, username, and the public test-only password for its process and restores prior values afterward. It never loads developer credentials.
+
+The test service uses `editingtab_core_test` / `editingtab_test`, loopback host port 15433, and tmpfs storage. No development volume is mounted. Its data is disposable and lost when stopped. To choose a different free test port:
+
+```powershell
+$env:CORE_TEST_DB_PORT = '25433'
+./scripts/start-db.ps1 -TestDatabase
+./scripts/test-integration.ps1 -Port 25433
+```
+
+The runner defaults to 15433; pass the same overridden port explicitly. Tests reject nonlocal hosts, incorrect database/user names, and development port 15432; they never fall back to development settings. They run no drops, resets, or downgrades. Enabled integration tests fail if configuration is missing or PostgreSQL is unavailable. They verify actual connectivity, PostgreSQL 17, upgrade to head, current revision, repeat upgrade, and real readiness.
+
+## Outage check and stopping
+
+With the API still running, stop only this project's development database, then restore it even if a check fails:
+
+```powershell
+try {
+    docker compose stop db
+    Invoke-RestMethod http://127.0.0.1:18080/health/live
+    try {
+        Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/health/ready
+    } catch {
+        [int]$_.Exception.Response.StatusCode # Expected: 503
+    }
+} finally {
+    docker compose start --wait db
+}
+Invoke-RestMethod http://127.0.0.1:18080/health/ready
+```
+
+Expect liveness 200 throughout and readiness 200 → 503 → 200 without restarting the API. Stop the API with Ctrl+C. Stop project databases without deleting the persistent development data:
+
+```powershell
+docker compose --profile test stop db db-test
+```
+
+Do not use prune or volume-removal commands. Stopping the test service discards its tmpfs data; restart and rerun integration tests when needed.

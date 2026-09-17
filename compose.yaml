@@ -1,0 +1,41 @@
+name: editingtab-core-dev
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: editingtab_core
+      POSTGRES_USER: editingtab_dev
+      POSTGRES_PASSWORD: ${CORE_DB_PASSWORD:?Run scripts/init-dev.py first}
+    ports:
+      - "127.0.0.1:${CORE_DB_PORT:-15432}:5432"
+    volumes:
+      - core_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U editingtab_dev -d editingtab_core"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  db-test:
+    profiles: ["test"]
+    image: postgres:17
+    environment:
+      POSTGRES_DB: editingtab_core_test
+      POSTGRES_USER: editingtab_test
+      # Public disposable test-only credential, never used for development.
+      POSTGRES_PASSWORD: editingtab-test-only
+    ports:
+      - "127.0.0.1:${CORE_TEST_DB_PORT:-15433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U editingtab_test -d editingtab_core_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  core_postgres_data:
