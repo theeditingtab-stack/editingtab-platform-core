@@ -71,7 +71,11 @@ class AuthRequestGuard:
         self.origins = frozenset(origins)
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not scope["path"].startswith("/auth/"):
+        if scope["type"] != "http" or not (
+            scope["path"].startswith("/auth/")
+            or scope["path"] == "/organizations"
+            or scope["path"].startswith("/organizations/")
+        ):
             return await self.app(scope, receive, send)
 
         async def no_cache(message):

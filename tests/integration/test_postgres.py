@@ -8,8 +8,10 @@ from sqlalchemy import DateTime, inspect, text
 from sqlalchemy.orm import Session
 
 from editingtab_core.app import create_app
+from editingtab_core.auth.models import PasswordCredential
+from editingtab_core.auth.security import Passwords
 from editingtab_core.identity import services as identity
-from editingtab_core.identity.models import Base, User
+from editingtab_core.identity.models import Base, Membership, User
 
 pytestmark = pytest.mark.integration
 
@@ -51,11 +53,27 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
         existing_id = identity.create_user(
             session, email="preserved@example.test", display_name="Preserved"
         )
+    command.upgrade(migration_config, "0003_password_sessions")
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        org_id = identity.create_organization(session, name="Preserved", slug="preserved")
+        member_id = identity.add_membership(session, organization_id=org_id, user_id=existing_id)
+        with session.begin():
+            session.add(
+                PasswordCredential(
+                    user_id=existing_id,
+                    password_hash=Passwords().hash("synthetic preserved password"),
+                )
+            )
     command.upgrade(migration_config, "head")
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         assert session.get(User, existing_id).email == "preserved@example.test"
+        assert session.get(Membership, member_id).user_id == existing_id
+        assert Passwords().verify(
+            session.get(PasswordCredential, existing_id).password_hash,
+            "synthetic preserved password",
+        )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0003_password_sessions"
+    assert expected_head == "0004_organization_roles"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)

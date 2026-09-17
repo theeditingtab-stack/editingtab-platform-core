@@ -18,6 +18,8 @@ from editingtab_core.auth.security import (
     LoginThrottled,
     Passwords,
 )
+from editingtab_core.authorization.http import router as organization_router
+from editingtab_core.authorization.policy import AccessError
 from editingtab_core.config import Settings, load_settings
 from editingtab_core.database import build_engine, get_session
 
@@ -40,6 +42,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.add_middleware(AuthRequestGuard, origins=settings.auth_allowed_origins)
     app.include_router(router)
+    app.include_router(organization_router)
+
+    @app.exception_handler(AccessError)
+    async def organization_error(request, error):
+        return JSONResponse(status_code=error.status, content={"detail": error.message})
 
     @app.exception_handler(AuthenticationError)
     async def authentication_error(request, error):

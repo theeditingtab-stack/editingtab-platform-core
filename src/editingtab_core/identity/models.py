@@ -71,6 +71,7 @@ class Membership(_Record, Base):
             "organization_id", "user_id", name="uq_core_memberships_organization_user"
         ),
         Index("ix_core_memberships_user_id", "user_id"),
+        UniqueConstraint("id", "organization_id", name="uq_core_memberships_id_organization"),
     )
 
     organization_id: Mapped[UUID] = mapped_column(

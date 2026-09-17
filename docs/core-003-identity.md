@@ -1,6 +1,6 @@
 # CORE-003: Internal identity persistence
 
-CORE-003 adds Core-owned organizations, users, and memberships. These remain internal Python services and repositories. This document records the CORE-003 checkpoint, which did not implement authentication. CORE-004 subsequently adds [password authentication](core-004-authentication.md); authorization, public management endpoints, roles, invitations, Booking, and frontend remain unimplemented.
+CORE-003 adds Core-owned organizations, users, and memberships. These remain internal Python services and repositories. This document records the CORE-003 checkpoint, which did not implement authentication. CORE-004 subsequently adds [password authentication](core-004-authentication.md); CORE-005 subsequently adds [organization roles and scoped authorization](core-005-authorization.md). Invitations, Booking, and frontend remain unimplemented.
 
 The resumed workspace contained six partial identity files and the new migration, plus changes to Alembic's environment. They were reviewed and completed in place. No unrelated user changes were present.
 
@@ -20,7 +20,7 @@ The membership pair's unique index also supports organization-prefixed lookups. 
 
 ## Normalization and soft deletion
 
-- Slugs: trim surrounding whitespace, lowercase, then require 1â€“63 ASCII letters/digits separated by single hyphens. Names are trimmed, nonblank, at most 200 characters, and contain no control characters.
+- Slugs: trim surrounding whitespace, lowercase, then require 1Ã¢â‚¬â€œ63 ASCII letters/digits separated by single hyphens. Names are trimmed, nonblank, at most 200 characters, and contain no control characters.
 - Emails: trim surrounding whitespace, retain casing in `email`, and lowercase the entire address in `normalized_email`. Dots and plus-addressing are preserved. Uniqueness is case-insensitive by this platform policy, including the local part.
 - This checkpoint accepts printable ASCII addresses with exactly one `@`, nonempty parts, no whitespace, and length at most 254. This is a basic persistence policy, not complete RFC validation or proof of mailbox ownership/deliverability. Internationalized addresses/SMTPUTF8 require a later explicit policy. PostgreSQL's C-collation lowercase check prevents a direct insert with an inconsistent lookup value.
 - Organization slugs and normalized user emails remain reserved after archival. Membership pairs remain unique even while archived.
@@ -70,7 +70,7 @@ Local checks:
 - Ruff lint and format check: passed. Initial import/formatting issues in the partial files were corrected without weakening checks.
 - Unit/safety selection: 45 passed, including all existing health/configuration tests.
 - Integration helper: 28 passed (23 PostgreSQL tests plus 5 repeated configuration safety tests).
-- Baseline â†’ `0002_core_identity` â†’ repeated head: passed within the isolated test database.
+- Baseline Ã¢â€ â€™ `0002_core_identity` Ã¢â€ â€™ repeated head: passed within the isolated test database.
 - Git diff whitespace checks and documentation link/path checks passed. The baseline migration, dependency files, CI workflow, health routes, and database lifecycle remain unchanged.
 - No development upgrade, downgrade, reset, or deletion was performed.
 
@@ -113,3 +113,4 @@ Expected development head after that manual upgrade: `0002_core_identity (head)`
 Suggested commit message: `feat(core): add organizations users and scoped memberships`.
 
 No commit, push, repository setting change, or next-checkpoint implementation was performed.
+CORE-005 lifecycle update: membership archival with role assignments now requires an explicit authorized actor, removes and audits those assignments, and protects the last administrator. Restoration does not restore historical roles. Organization archival remains internal and makes all organization access unavailable. Earlier test counts above are historical checkpoint evidence.

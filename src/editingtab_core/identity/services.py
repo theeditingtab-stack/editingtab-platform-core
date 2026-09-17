@@ -9,6 +9,10 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from editingtab_core.authorization.services import (
+    before_membership_archive,
+    before_membership_restore,
+)
 from editingtab_core.identity import repository
 from editingtab_core.identity.errors import (
     IdentityConflict,
@@ -100,6 +104,7 @@ def add_membership(session: Session, *, organization_id: UUID, user_id: UUID) ->
                 session, organization_id=organization_id, user_id=user_id
             )
         elif membership.deleted_at is not None:
+            before_membership_restore(session, organization_id, membership.id)
             membership.deleted_at = None
             session.flush()
         result = membership.id
@@ -139,7 +144,9 @@ def archive_organization(session: Session, *, organization_id: UUID) -> None:
             organization.deleted_at = datetime.now(UTC)
 
 
-def archive_membership(session: Session, *, organization_id: UUID, membership_id: UUID) -> None:
+def archive_membership(
+    session: Session, *, organization_id: UUID, membership_id: UUID, actor_id: UUID | None = None
+) -> None:
     with _transaction(session):
         organization = repository._organization_including_archived(session, organization_id)
         if organization is None:
@@ -150,4 +157,5 @@ def archive_membership(session: Session, *, organization_id: UUID, membership_id
         if membership is None:
             raise IdentityNotFound("Membership was not found.")
         if membership.deleted_at is None:
+            before_membership_archive(session, organization, membership, actor_id)
             membership.deleted_at = datetime.now(UTC)

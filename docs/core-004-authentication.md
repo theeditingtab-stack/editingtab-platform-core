@@ -1,3 +1,5 @@
+> Historical CORE-004 handoff. CORE-005 now adds [organization roles and enforced permissions](core-005-authorization.md); authentication remains unchanged. Public organization routes require current membership/permissions, and the Origin guard also covers `/organizations`.
+
 # CORE-004: Password authentication and revocable sessions
 
 The Editing Tab now provides `POST /auth/login`, `POST /auth/logout`, and `GET /auth/me`. Authentication identifies a user; it grants no organization or platform administration permission. Organization management endpoints, roles, invitations, public signup, account recovery, Booking, and frontend remain unimplemented. CORE-003 is committed at `711716e` and verified according to the user.
@@ -71,7 +73,7 @@ $securePassword = Read-Host 'Demo password' -AsSecureString
 $credential = [System.Management.Automation.PSCredential]::new('demo@example.test', $securePassword)
 try {
     $body = @{ email = $credential.UserName; password = $credential.GetNetworkCredential().Password } | ConvertTo-Json -Compress
-    $login = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/auth/login" -Method Post -ContentType 'application/json' -Body $body -Headers $originHeaders -SessionVariable authSession
+    $login = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/auth/login" -Method Post -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) -Headers $originHeaders -SessionVariable authSession
     $login.StatusCode # 204; do not print the response headers or cookie jar
 } finally {
     Remove-Variable body, credential, securePassword -ErrorAction SilentlyContinue
