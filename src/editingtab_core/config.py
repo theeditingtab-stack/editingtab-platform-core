@@ -38,6 +38,18 @@ class Settings(BaseSettings):
     auth_account_limit: int = Field(default=5, ge=1, le=100)
     auth_source_limit: int = Field(default=30, ge=1, le=1000)
 
+    booking_service_current_digest: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    booking_service_previous_digest: SecretStr | None = Field(
+        default=None, repr=False, exclude=True
+    )
+
+    @field_validator("booking_service_current_digest", "booking_service_previous_digest")
+    @classmethod
+    def service_digest(cls, value):
+        if value is not None and re.fullmatch(r"[0-9a-f]{64}", value.get_secret_value()) is None:
+            raise ValueError("Service digest must be lowercase SHA-256 hexadecimal.")
+        return value
+
     @property
     def auth_secure_cookie(self) -> bool:
         # An omitted environment must never silently enable insecure cookies.

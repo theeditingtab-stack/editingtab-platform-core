@@ -11,7 +11,6 @@ from editingtab_core.app import create_app
 from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
-from editingtab_core.authorization.onboarding import _create_owned_organization
 from editingtab_core.authorization.policy import OWNER_PERMISSIONS
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
@@ -67,17 +66,32 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     password_hash=Passwords().hash("synthetic preserved password"),
                 )
             )
-    command.upgrade(migration_config, "0004_organization_roles")
-    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
-        with session.begin():
-            owned_id = _create_owned_organization(
-                session,
-                name="Preserved roles",
-                slug="preserved-roles",
-                owner_id=existing_id,
-                actor_id=existing_id,
-            ).id
-            role_id = session.scalar(select(Role.id).where(Role.organization_id == owned_id))
+    command.upgrade(migration_config, "0005_platform_onboarding")
+    from uuid import uuid4
+
+    owned_id, role_id = org_id, uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO core_roles (id, organization_id, name, normalized_name) "
+            "VALUES (:id, :org, 'Preserved', 'preserved')"
+        ),
+        {"id": role_id, "org": org_id},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO core_membership_roles (organization_id, membership_id, role_id) "
+            "VALUES (:org, :member, :role)"
+        ),
+        {"org": org_id, "member": member_id, "role": role_id},
+    )
+    for code in OWNER_PERMISSIONS:
+        connection.execute(
+            text(
+                "INSERT INTO core_role_permissions (organization_id, role_id, code) "
+                "VALUES (:org, :role, :code)"
+            ),
+            {"org": org_id, "role": role_id, "code": code},
+        )
     command.upgrade(migration_config, "head")
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         assert session.get(Role, role_id).organization_id == owned_id
@@ -102,7 +116,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0005_platform_onboarding"
+    assert expected_head == "0006_booking_authorization"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)

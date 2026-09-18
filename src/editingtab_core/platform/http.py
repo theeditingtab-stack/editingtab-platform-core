@@ -60,3 +60,22 @@ def update_module(
 @tenant_router.get("/{organization_id}/modules")
 def tenant_modules(organization_id: UUID, session: Database, actor_id: Actor):
     return services.tenant_entitlements(session, actor_id=actor_id, organization_id=organization_id)
+
+
+class BookingProvisionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    membership_id: UUID
+
+
+@router.post("/organizations/{organization_id}/booking-inventory-administrator")
+def booking_administrator(
+    organization_id: UUID, body: BookingProvisionInput, session: Database, actor_id: Actor
+):
+    from editingtab_core.platform.booking_permissions import provision
+
+    return provision(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        membership_id=body.membership_id,
+    )

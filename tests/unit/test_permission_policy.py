@@ -16,7 +16,8 @@ def test_owner_is_explicit_and_no_platform_permissions():
         "core.roles.read",
         "core.roles.manage",
     }
-    assert CATALOG == OWNER_PERMISSIONS == expected
+    assert OWNER_PERMISSIONS == expected
+    assert CATALOG == expected | {"booking.inventory.read", "booking.inventory.manage"}
     with pytest.raises(InvalidPermission):
         permissions(["platform.admin"])
 

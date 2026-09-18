@@ -1,6 +1,8 @@
 """Explicit catalog: adding features requires deliberately adding permissions."""
 
-CATALOG = frozenset(
+BOOKING_PERMISSIONS = frozenset({"booking.inventory.read", "booking.inventory.manage"})
+
+CATALOG = BOOKING_PERMISSIONS | frozenset(
     {
         "core.organization.read",
         "core.members.read",
