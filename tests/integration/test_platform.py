@@ -133,7 +133,8 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
         == org
     )
     roles = tenant.list_roles(identity_session, organization_id=org, actor_id=setup.owner)
-    assert set(roles[0]["permissions"]) == OWNER_PERMISSIONS
+    assert {permission["code"] for permission in roles[0]["permissions"]} == OWNER_PERMISSIONS
+    assert all(permission["can_grant"] for permission in roles[0]["permissions"])
     with identity_session.begin():
         audits = identity_session.scalars(
             select(RoleAudit).where(RoleAudit.organization_id == org)

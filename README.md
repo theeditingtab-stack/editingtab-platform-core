@@ -2,7 +2,7 @@
 
 The Editing Tab is a modular business platform for hotels, safari operators, and related businesses. Initial delivery covers Platform Core and Booking; future modules include POS, Unified Inbox, and Chatbot. Initial scope excludes payment gateway integration.
 
-CORE-002 provides configuration, health endpoints, PostgreSQL connectivity, migrations, tests, Ruff, and CI. CORE-003 adds internal organization, user, and membership persistence with explicit organization scoping and soft deletion. CORE-004 adds Argon2id password authentication, revocable cookie sessions, Origin checks, and shared login throttling. CORE-005 adds organization roles, enforced permissions, scoped administration endpoints, and transactional role audit. CORE-006 adds separate platform authority, atomic existing-user onboarding, and server-side module entitlements. CORE-007 adds Core's internal Booking authorization contract and explicit Booking permission provisioning. CORE-AUTH-001 adds the data-driven permission registry and reviewed Core/Booking vocabulary. Booking client implementation, frontend, domains, recovery, and integrations remain future work. This is not a production-ready platform.
+CORE-002 provides configuration, health endpoints, PostgreSQL connectivity, migrations, tests, Ruff, and CI. CORE-003 adds internal organization, user, and membership persistence with explicit organization scoping and soft deletion. CORE-004 adds Argon2id password authentication, revocable cookie sessions, Origin checks, and shared login throttling. CORE-005 adds organization roles, enforced permissions, scoped administration endpoints, and transactional role audit. CORE-006 adds separate platform authority, atomic existing-user onboarding, and server-side module entitlements. CORE-007 adds Core's internal Booking authorization contract and explicit Booking permission provisioning. CORE-AUTH-001 adds the data-driven permission registry and reviewed Core/Booking vocabulary. CORE-AUTH-002 separates permission use from delegation and enforces granular role operations. Booking client implementation, frontend, domains, recovery, and integrations remain future work. This is not a production-ready platform.
 
 ## Documents
 
@@ -25,9 +25,11 @@ CORE-002 provides configuration, health endpoints, PostgreSQL connectivity, migr
 
 - [CORE-AUTH-001 permission registry](docs/core-auth-001-permission-registry.md): registry integrity, final vocabulary, catalog API, and compatibility policy.
 
+- [CORE-AUTH-002 grant authority](docs/core-auth-002-grant-authority.md): explicit delegation, granular role operations, migration policy, and role API contract.
+
 ## Structure and ownership
 
-`src/editingtab_core` contains application configuration, lifecycle, database session support, and health routes. `identity` contains Core-owned models, explicit repositories, and transaction-owning services. `auth` owns credentials, sessions, and login throttles. `migrations` retains the earlier revisions through `0007_permission_registry`; migrations are never applied at application startup. `tests/unit` contains mocked/configuration tests; `tests/integration` contains real PostgreSQL tests and database safety checks. `scripts` contains small local helpers.
+`src/editingtab_core` contains application configuration, lifecycle, database session support, and health routes. `identity` contains Core-owned models, explicit repositories, and transaction-owning services. `auth` owns credentials, sessions, and login throttles. `migrations` retains the earlier revisions through `0008_delegated_grant_authority`; migrations are never applied at application startup. `tests/unit` contains mocked/configuration tests; `tests/integration` contains real PostgreSQL tests and database safety checks. `scripts` contains small local helpers.
 
 Core owns shared identity, organization authorization, and platform administration. Booking will own inventory and reservations. Core is a modular application; Booking now has a separate repository and database. Their connection uses an authenticated internal authorization contract, never shared database access. Future module interfaces must preserve ownership and prevent access to private tables; no empty domain layers or speculative tables have been added.
 

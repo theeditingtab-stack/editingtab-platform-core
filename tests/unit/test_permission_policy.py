@@ -14,7 +14,10 @@ def test_owner_is_explicit_and_no_platform_permissions():
         "core.organization.read",
         "core.members.read",
         "core.roles.read",
-        "core.roles.manage",
+        "core.roles.create",
+        "core.roles.update",
+        "core.roles.archive",
+        "core.roles.assign",
     }
     assert OWNER_PERMISSIONS == expected
     assert BOOKING_INVENTORY_PERMISSIONS == {

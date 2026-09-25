@@ -114,6 +114,7 @@ class RolePermission(Base):
     organization_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     role_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    can_grant: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     definition_organization_assignable: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"
     )
@@ -156,5 +157,5 @@ class RoleAudit(Base):
     target_id: Mapped[UUID] = mapped_column(Uuid)
     membership_id: Mapped[UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    permissions_before: Mapped[list[str]] = mapped_column(JSONB)
-    permissions_after: Mapped[list[str]] = mapped_column(JSONB)
+    permissions_before: Mapped[list[object]] = mapped_column(JSONB)
+    permissions_after: Mapped[list[object]] = mapped_column(JSONB)

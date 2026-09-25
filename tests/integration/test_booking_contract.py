@@ -18,7 +18,7 @@ from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import COOKIE_NAME, Passwords, token_digest
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization import services as access
-from editingtab_core.authorization.models import Role, RoleAudit
+from editingtab_core.authorization.models import MembershipRole, Role, RoleAudit, RolePermission
 from editingtab_core.authorization.policy import (
     BOOKING_INVENTORY_PERMISSIONS,
     BOOKING_PERMISSIONS,
@@ -260,14 +260,19 @@ def test_permission_entitlement_and_revocation_without_relogin(identity_session,
             enabled=True,
         )
         assert request(client, env).status_code == 200
-        access.change_assignment(
-            identity_session,
-            organization_id=env.org,
-            actor_id=env.owner,
-            membership_id=env.member,
-            role_id=role,
-            remove=True,
-        )
+        with pytest.raises(AccessError):
+            access.change_assignment(
+                identity_session,
+                organization_id=env.org,
+                actor_id=env.owner,
+                membership_id=env.member,
+                role_id=role,
+                remove=True,
+            )
+        with identity_session.begin():
+            identity_session.delete(
+                identity_session.get(MembershipRole, (env.org, env.member, role))
+            )
         error(request(client, env), 403, "permission_denied")
         grant(identity_session, env)
         auth.logout(identity_session, env.tokens["owner"])
@@ -323,7 +328,7 @@ def test_database_failure_is_unavailable_not_denial_or_allow(identity_session, e
         error(request(client, env), 503, "authorization_unavailable")
 
 
-def test_provisioning_idempotent_audit_and_tenant_delegation(identity_session, env):
+def test_provisioning_idempotent_audit_and_no_tenant_delegation(identity_session, env):
     result = grant(identity_session, env)
     with identity_session.begin():
         audit = identity_session.scalar(
@@ -331,7 +336,10 @@ def test_provisioning_idempotent_audit_and_tenant_delegation(identity_session, e
         )
         assert audit.actor_id == env.operator and audit.target_id == env.member
         assert audit.before == {"assigned": False, "permissions": []}
-        assert set(audit.after["permissions"]) == BOOKING_INVENTORY_PERMISSIONS
+        assert {item["code"] for item in audit.after["permissions"]} == (
+            BOOKING_INVENTORY_PERMISSIONS
+        )
+        assert all(not item["can_grant"] for item in audit.after["permissions"])
         count = identity_session.scalar(select(func.count()).select_from(RoleAudit))
     assert grant(identity_session, env) == result
     with identity_session.begin():
@@ -344,22 +352,17 @@ def test_provisioning_idempotent_audit_and_tenant_delegation(identity_session, e
             )
             == 1
         )
-    role = access.create_role(
-        identity_session,
-        organization_id=env.org,
-        actor_id=env.owner,
-        name="Booking reader",
-        codes=[READ],
-    )["id"]
-    access.change_assignment(
-        identity_session,
-        organization_id=env.org,
-        actor_id=env.owner,
-        membership_id=env.ordinary_member,
-        role_id=role,
-    )
     with identity_session.begin():
-        assert READ in repo.effective_permissions(identity_session, env.org, env.ordinary)
+        assert READ in repo.effective_permissions(identity_session, env.org, env.owner)
+        assert READ not in repo.effective_grant_authority(identity_session, env.org, env.owner)
+    with pytest.raises(AccessError):
+        access.create_role(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            name="Booking reader",
+            codes=[READ],
+        )
 
 
 @pytest.mark.parametrize(
@@ -432,14 +435,15 @@ def test_provisioning_atomic_failure_and_designated_role_collision(identity_sess
             is None
         )
     role = grant(identity_session, env)["role_id"]
-    access.update_role(
-        identity_session,
-        organization_id=env.org,
-        actor_id=env.owner,
-        role_id=role,
-        name=ROLE_NAME,
-        codes=[*BOOKING_INVENTORY_PERMISSIONS, "core.roles.manage"],
-    )
+    with identity_session.begin():
+        identity_session.add(
+            RolePermission(
+                organization_id=env.org,
+                role_id=role,
+                code="core.organization.read",
+                can_grant=False,
+            )
+        )
     with pytest.raises(Conflict):
         grant(identity_session, env)
 
@@ -466,19 +470,13 @@ def test_browser_origin_remains_required_for_explicit_provisioning(identity_sess
 @pytest.mark.parametrize("state", ["renamed", "archived"])
 def test_designated_role_is_not_silently_restored_or_repurposed(identity_session, env, state):
     role = grant(identity_session, env)["role_id"]
-    if state == "renamed":
-        access.update_role(
-            identity_session,
-            organization_id=env.org,
-            actor_id=env.owner,
-            role_id=role,
-            name="Tenant repurposed",
-            codes=BOOKING_INVENTORY_PERMISSIONS,
-        )
-    else:
-        access.archive_role(
-            identity_session, organization_id=env.org, actor_id=env.owner, role_id=role
-        )
+    with identity_session.begin():
+        designated = identity_session.get(Role, role)
+        if state == "renamed":
+            designated.name = "Tenant repurposed"
+            designated.normalized_name = "tenant repurposed"
+        else:
+            designated.deleted_at = datetime.now(UTC)
     with pytest.raises(Conflict):
         grant(identity_session, env)
 
@@ -487,14 +485,8 @@ def test_explicit_reprovision_can_restore_only_designated_booking_permissions(
     identity_session, env
 ):
     role = grant(identity_session, env)["role_id"]
-    access.update_role(
-        identity_session,
-        organization_id=env.org,
-        actor_id=env.owner,
-        role_id=role,
-        name=ROLE_NAME,
-        codes=[READ],
-    )
+    with identity_session.begin():
+        repo.replace_permissions(identity_session, env.org, role, {READ: False})
     grant(identity_session, env)
     with identity_session.begin():
         assert (
@@ -504,4 +496,11 @@ def test_explicit_reprovision_can_restore_only_designated_booking_permissions(
             select(PlatformAudit).where(PlatformAudit.action == "booking.permissions.provisioned")
         ).all()
         assert len(audits) == 2
-        assert any(row.before == {"assigned": True, "permissions": [READ]} for row in audits)
+        assert any(
+            row.before
+            == {
+                "assigned": True,
+                "permissions": [{"code": READ, "can_grant": False}],
+            }
+            for row in audits
+        )

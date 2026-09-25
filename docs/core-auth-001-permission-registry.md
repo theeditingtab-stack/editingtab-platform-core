@@ -48,12 +48,11 @@ deleting authorization data.
 | Booking | `booking.settings.read` | Read Booking settings |
 | Booking | `booking.settings.manage` | Manage Booking settings |
 
-The existing `Organization owner` bootstrap role retains its original four Core permissions.
-`core.roles.manage` remains the enforced compatibility capability for all current role operations,
-so existing administrators lose no authority. The granular role codes are registered for
-CORE-AUTH-002 but are not enforced or automatically granted here. The existing explicit Booking
-inventory provisioner still grants only `booking.inventory.read` and
-`booking.inventory.manage`.
+At the end of CORE-AUTH-001, the existing `Organization owner` role retained its original four
+Core permissions and `core.roles.manage` remained the enforced compatibility capability.
+CORE-AUTH-002 supersedes that temporary policy with granular role-operation enforcement and maps
+historical administrator roles during migration. See
+[delegated grant authority](core-auth-002-grant-authority.md).
 
 ## Catalog and authorization behavior
 

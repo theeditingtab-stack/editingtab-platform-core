@@ -11,7 +11,8 @@ The central catalog in `authorization/policy.py` contains exactly:
 - `core.organization.read`: read an accessible organization.
 - `core.members.read`: list active memberships and minimal user profiles.
 - `core.roles.read`: list active roles and permission codes.
-- `core.roles.manage`: create/update/archive roles and assign/remove roles.
+- `core.roles.manage`: historical create/update/archive/assignment authority, superseded by the
+  granular CORE-AUTH-002 operations documented below.
 
 The local bootstrap's `Organization owner` role explicitly contains these four codes. No wildcard includes future capabilities. New permissions must accompany their protected features, database catalog migration, request limits, and tests. Unknown codes, including platform privileges, are rejected in services and by a database CHECK constraint.
 
@@ -25,7 +26,7 @@ Role names are trimmed printable ASCII, 1?100 characters. Uniqueness uses ASCII 
 
 ## Last administrator and lifecycle
 
-Changes that would remove the last active member with `core.roles.manage` return 409 and roll back. The prospective state is evaluated after flushing inside the same transaction. `SELECT FOR UPDATE` on the organization serializes conflicting changes under default READ COMMITTED isolation; PostgreSQL [row locks](https://www.postgresql.org/docs/17/explicit-locking.html) last until transaction completion. A test proves two real connections overlap on database locks: one administrator removal succeeds, the other is rejected.
+CORE-AUTH-002 now defines an administrator as an active member who can use and delegate role read/create/update/archive/assign. Changes that remove the last such member return 409 and roll back. The prospective state is evaluated after flushing inside the same transaction. `SELECT FOR UPDATE` on the organization serializes conflicting changes under default READ COMMITTED isolation; PostgreSQL [row locks](https://www.postgresql.org/docs/17/explicit-locking.html) last until transaction completion. A test proves two real connections overlap on database locks: one administrator removal succeeds, the other is rejected.
 
 Internal membership archival now removes role assignments with audit and last-admin checks. If assignments exist, an explicit authorized `actor_id` is required; omitting it cannot bypass checks. Restored memberships have no historical roles and need explicit reassignment. Unexpected historical assignments on an archived membership cause restoration to fail closed. Membership operations without assignments remain compatible with legacy organizations having no administrator yet. Bootstrap does not silently repair existing organizations.
 
@@ -43,11 +44,11 @@ All routes require the existing session cookie. Every mutation also requires the
 | `GET /organizations/{org}` | `core.organization.read`; id/name/slug |
 | `GET /organizations/{org}/members` | `core.members.read`; membership id, user id, display name |
 | `GET /organizations/{org}/roles` | `core.roles.read`; id, name, permission codes |
-| `POST /organizations/{org}/roles` | `core.roles.manage`; JSON name/permissions; 201 role |
-| `PUT /organizations/{org}/roles/{role}` | `core.roles.manage`; full replacement JSON name/permissions; 200 role |
-| `DELETE /organizations/{org}/roles/{role}` | `core.roles.manage`; archive; 204 |
-| `PUT /organizations/{org}/members/{member}/roles/{role}` | `core.roles.manage`; idempotent assignment; 204 |
-| `DELETE /organizations/{org}/members/{member}/roles/{role}` | `core.roles.manage`; remove existing assignment; 204 |
+| `POST /organizations/{org}/roles` | `core.roles.create`; JSON name/permission objects; 201 role |
+| `PUT /organizations/{org}/roles/{role}` | `core.roles.update`; full replacement JSON name/permission objects; 200 role |
+| `DELETE /organizations/{org}/roles/{role}` | `core.roles.archive`; archive; 204 |
+| `PUT /organizations/{org}/members/{member}/roles/{role}` | `core.roles.assign`; idempotent assignment; 204 |
+| `DELETE /organizations/{org}/members/{member}/roles/{role}` | `core.roles.assign`; remove existing assignment; 204 |
 
 401 means unauthenticated. Inaccessible organizations and foreign resource IDs return the same 404 `Resource not found.` Active members lacking permission receive 403. Last-admin and reserved-name conflicts return safe 409 responses. Invalid catalog/input returns 422; database errors return generic 503. Origin failures are 403 before route execution. Role bodies accept only `name` and `permissions`; assignment requests need no body.
 
@@ -174,7 +175,7 @@ Expect-Status { Invoke-WebRequest -UseBasicParsing "$base/organizations/$hotel" 
 Expect-Status { Invoke-WebRequest -UseBasicParsing "$base/organizations/$hotel" -WebSession $observerSession } 403
 Expect-Status { Invoke-WebRequest -UseBasicParsing "$base/organizations/$safari" -WebSession $ownerSession } 404
 
-$reader = Send-DemoJson "$base/organizations/$hotel/roles" 'Post' @{ name = 'Demo reader'; permissions = @('core.organization.read') } $ownerSession
+$reader = Send-DemoJson "$base/organizations/$hotel/roles" 'Post' @{ name = 'Demo reader'; permissions = @(@{ code = 'core.organization.read'; can_grant = $false }) } $ownerSession
 $assignment = "$base/organizations/$hotel/members/$observerMember/roles/$($reader.id)"
 Expect-Status { Invoke-WebRequest -UseBasicParsing $assignment -Method Put -Headers $origin -WebSession $ownerSession } 204
 Expect-Status { Invoke-WebRequest -UseBasicParsing "$base/organizations/$hotel" -WebSession $observerSession } 200

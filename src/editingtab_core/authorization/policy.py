@@ -19,10 +19,19 @@ OWNER_PERMISSIONS = frozenset(
         "core.organization.read",
         "core.members.read",
         "core.roles.read",
-        "core.roles.manage",
+        "core.roles.create",
+        "core.roles.update",
+        "core.roles.archive",
+        "core.roles.assign",
     }
 )
-MANAGE = "core.roles.manage"
+ROLE_CREATE = "core.roles.create"
+ROLE_UPDATE = "core.roles.update"
+ROLE_ARCHIVE = "core.roles.archive"
+ROLE_ASSIGN = "core.roles.assign"
+ADMINISTRATOR_PERMISSIONS = frozenset(
+    {"core.roles.read", ROLE_CREATE, ROLE_UPDATE, ROLE_ARCHIVE, ROLE_ASSIGN}
+)
 
 
 class AccessError(Exception):

@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from editingtab_core.auth.security import COOKIE_NAME
@@ -25,10 +25,23 @@ def actor(request: Request, session: Database) -> UUID:
 Actor = Annotated[UUID, Depends(actor)]
 
 
+class RolePermissionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=1, max_length=64)
+    can_grant: bool
+
+
 class RoleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    permissions: list[str] = Field(max_length=100)
+    permissions: list[RolePermissionInput] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def unique_permissions(self):
+        codes = [permission.code for permission in self.permissions]
+        if len(codes) != len(set(codes)):
+            raise ValueError("duplicate permission code")
+        return self
 
 
 @router.get("")
@@ -73,7 +86,7 @@ def create_role(organization_id: UUID, body: RoleInput, session: Database, actor
         organization_id=organization_id,
         actor_id=actor_id,
         name=body.name,
-        codes=body.permissions,
+        permissions={item.code: item.can_grant for item in body.permissions},
     )
 
 
@@ -87,7 +100,7 @@ def update_role(
         actor_id=actor_id,
         role_id=role_id,
         name=body.name,
-        codes=body.permissions,
+        permissions={item.code: item.can_grant for item in body.permissions},
     )
 
 
