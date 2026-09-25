@@ -18,10 +18,9 @@ def _create_owned_organization(session, *, name, slug, owner_id, actor_id):
     )
     session.add(role)
     session.flush()
-    repo.replace_permissions(session, org.id, role.id, OWNER_PERMISSIONS)
+    permissions = dict.fromkeys(OWNER_PERMISSIONS, True)
+    repo.replace_permissions(session, org.id, role.id, permissions)
     session.add(MembershipRole(organization_id=org.id, membership_id=member.id, role_id=role.id))
-    repo.audit(session, org.id, actor_id, "role.bootstrapped", role.id, [], OWNER_PERMISSIONS)
-    repo.audit(
-        session, org.id, actor_id, "assignment.added", role.id, [], OWNER_PERMISSIONS, member.id
-    )
+    repo.audit(session, org.id, actor_id, "role.bootstrapped", role.id, {}, permissions)
+    repo.audit(session, org.id, actor_id, "assignment.added", role.id, {}, permissions, member.id)
     return org

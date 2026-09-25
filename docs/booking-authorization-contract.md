@@ -69,7 +69,7 @@ The public production gateway must not route `/internal` paths. Restrict the pri
 
 ## Explicit initial Booking permission delegation
 
-Historical migration `0006_booking_authorization` added the initial two Booking inventory codes and nullable role provenance. Migration `0007_permission_registry` replaces the enumerated permission CHECK with the Core-owned registry and registers the final reviewed vocabulary. Neither migration grants a permission. Existing and newly created owner roles retain their four explicit Core permissions, and enabling Booking grants no user permission.
+Historical migration `0006_booking_authorization` added the initial two Booking inventory codes and nullable role provenance. Migration `0007_permission_registry` replaces the enumerated permission CHECK with the Core-owned registry and registers the final reviewed vocabulary. Migration `0008_delegated_grant_authority` adds delegation metadata; the dedicated Booking role remains non-delegating. Enabling Booking grants no user permission.
 
 A platform operator explicitly calls:
 
@@ -83,7 +83,7 @@ Cookie: <existing authenticated operator session>
 {"membership_id":"<active organization administrator membership UUID>"}
 ```
 
-It requires current platform authority, active organization, enabled Booking, an active same-organization membership/user, and the recipient's current `core.roles.manage` permission. It locks the organization inside the transaction and creates/updates only the marked `Booking inventory administrator` role with the two explicit Booking permissions. A same-name unmarked role, renamed/archived marked role, or marked role carrying unrelated permissions causes 409; nothing is taken over. Tenant role APIs cannot set the provenance marker or platform privileges.
+It requires current platform authority, active organization, enabled Booking, an active same-organization membership/user, and the recipient's current `core.roles.assign` permission. It locks the organization inside the transaction and creates/updates only the marked `Booking inventory administrator` role with the two explicit Booking permissions and `can_grant=false`. A same-name unmarked role, renamed/archived marked role, or marked role carrying unrelated permissions causes 409; nothing is taken over. Tenant role APIs cannot set the provenance marker or platform privileges.
 
 Assignment, permission changes, and audits commit atomically. Role audits record the actual operator and permission changes; platform audit targets the membership and records assigned state, role ID and permissions. Matching reruns make no changes or audit entries. Explicit reruns can restore missing Booking permissions/assignments on the still-designated active role; updating a shared role affects its existing assignees, so operators must review those assignments. There is no automatic regrant on startup, migration, or entitlement enablement. Tenant removal/revocation remains effective until an explicitly authorized provisioning/delegation action.
 
@@ -111,7 +111,7 @@ Use the existing operator, owner, organization and enabled entitlement. Do not r
    uv run --locked python scripts/init-booking-credential.py
    ```
 
-   Expected head: `0007_permission_registry`. Neither command was run against development by Codex.
+   Expected head: `0008_delegated_grant_authority`. Neither command was run against development by Codex.
 
 2. **Restart the API yourself in terminal A and leave it running.** Stop the previous process with Ctrl+C; load only the digest without printing it. Environment settings in terminal B do not configure terminal A.
 

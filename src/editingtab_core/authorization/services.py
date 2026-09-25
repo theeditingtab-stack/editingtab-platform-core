@@ -9,7 +9,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization.models import MembershipRole, Role
 from editingtab_core.authorization.policy import (
-    MANAGE,
+    ROLE_ARCHIVE,
+    ROLE_ASSIGN,
+    ROLE_CREATE,
+    ROLE_UPDATE,
     AccessError,
     Conflict,
     Inaccessible,
@@ -72,14 +75,26 @@ def _role(session, organization_id, role_id, *, archived=False):
     return role
 
 
-def _grantable(held, codes):
-    if not codes <= held:
+def _grantable(grant_authority, permissions):
+    if not permissions.keys() <= grant_authority:
         raise AccessError()
 
 
 def _permissions(session, values):
-    result = frozenset(values)
-    if repo.assignable_permission_codes(session, result) != result:
+    if isinstance(values, dict):
+        invalid = any(
+            not isinstance(code, str) or type(can_grant) is not bool
+            for code, can_grant in values.items()
+        )
+        if invalid:
+            raise InvalidPermission()
+        result = dict(values)
+    else:
+        items = list(values)
+        if any(not isinstance(code, str) for code in items) or len(items) != len(set(items)):
+            raise InvalidPermission()
+        result = dict.fromkeys(items, False)
+    if repo.assignable_permission_codes(session, result) != frozenset(result):
         raise InvalidPermission()
     return result
 
@@ -94,7 +109,9 @@ def _role_info(session, role):
     return {
         "id": role.id,
         "name": role.name,
-        "permissions": sorted(repo.role_permissions(session, role.organization_id, role.id)),
+        "permissions": repo.permission_state(
+            repo.role_permission_grants(session, role.organization_id, role.id)
+        ),
     }
 
 
@@ -171,27 +188,30 @@ def list_permission_catalog(session, *, organization_id, actor_id):
         ]
 
 
-def create_role(session, *, organization_id, actor_id, name, codes):
+def create_role(session, *, organization_id, actor_id, name, permissions=None, codes=None):
     with transaction(session):
-        _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
-        selected = _permissions(session, codes)
-        _grantable(held, selected)
+        authorize(session, organization_id, actor_id, ROLE_CREATE, lock=True)
+        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        selected = _permissions(session, permissions if permissions is not None else codes or [])
+        _grantable(grant_authority, selected)
         display, normalized = role_name(name)
         role = Role(organization_id=organization_id, name=display, normalized_name=normalized)
         session.add(role)
         session.flush()
         repo.replace_permissions(session, organization_id, role.id, selected)
-        repo.audit(session, organization_id, actor_id, "role.created", role.id, [], selected)
+        repo.audit(session, organization_id, actor_id, "role.created", role.id, {}, selected)
         return _role_info(session, role)
 
 
-def update_role(session, *, organization_id, actor_id, role_id, name, codes):
+def update_role(session, *, organization_id, actor_id, role_id, name, permissions=None, codes=None):
     with transaction(session):
-        _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
+        authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
+        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
         role = _role(session, organization_id, role_id)
-        before = repo.role_permissions(session, organization_id, role_id)
-        after = _permissions(session, codes)
-        _grantable(held, before | after)
+        before = repo.role_permission_grants(session, organization_id, role_id)
+        after = _permissions(session, permissions if permissions is not None else codes or [])
+        _grantable(grant_authority, before)
+        _grantable(grant_authority, after)
         role.name, role.normalized_name = role_name(name)
         role.updated_at = datetime.now(UTC)
         repo.replace_permissions(session, organization_id, role_id, after)
@@ -202,18 +222,20 @@ def update_role(session, *, organization_id, actor_id, role_id, name, codes):
 
 def archive_role(session, *, organization_id, actor_id, role_id):
     with transaction(session):
-        _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
+        authorize(session, organization_id, actor_id, ROLE_ARCHIVE, lock=True)
+        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
         role = _role(session, organization_id, role_id)
-        before = repo.role_permissions(session, organization_id, role_id)
-        _grantable(held, before)
+        before = repo.role_permission_grants(session, organization_id, role_id)
+        _grantable(grant_authority, before)
         role.deleted_at = datetime.now(UTC)
         ensure_administrator(session, organization_id)
-        repo.audit(session, organization_id, actor_id, "role.archived", role_id, before, [])
+        repo.audit(session, organization_id, actor_id, "role.archived", role_id, before, {})
 
 
 def change_assignment(session, *, organization_id, actor_id, membership_id, role_id, remove=False):
     with transaction(session):
-        _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
+        authorize(session, organization_id, actor_id, ROLE_ASSIGN, lock=True)
+        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
         _role(session, organization_id, role_id, archived=remove)
         if (
             session.execute(
@@ -222,8 +244,8 @@ def change_assignment(session, *, organization_id, actor_id, membership_id, role
             is None
         ):
             raise Inaccessible()
-        codes = repo.role_permissions(session, organization_id, role_id)
-        _grantable(held, codes)
+        permissions = repo.role_permission_grants(session, organization_id, role_id)
+        _grantable(grant_authority, permissions)
         assignment = session.get(MembershipRole, (organization_id, membership_id, role_id))
         if remove:
             if assignment is None:
@@ -244,8 +266,8 @@ def change_assignment(session, *, organization_id, actor_id, membership_id, role
             actor_id,
             "assignment.removed" if remove else "assignment.added",
             role_id,
-            codes if remove else [],
-            [] if remove else codes,
+            permissions if remove else {},
+            {} if remove else permissions,
             membership_id,
         )
 
@@ -266,10 +288,11 @@ def before_membership_archive(session, organization, membership, actor_id):
         raise AccessError()
     # Archived organization lifecycle may remove assignments only with an explicit actor;
     # ordinary role authority requires an active organization, so deny that path here.
-    _, held = authorize(session, organization.id, actor_id, MANAGE)
+    authorize(session, organization.id, actor_id, ROLE_ASSIGN)
+    grant_authority = repo.effective_grant_authority(session, organization.id, actor_id)
     for assignment in assignments:
-        codes = repo.role_permissions(session, organization.id, assignment.role_id)
-        _grantable(held, codes)
+        permissions = repo.role_permission_grants(session, organization.id, assignment.role_id)
+        _grantable(grant_authority, permissions)
         session.delete(assignment)
         repo.audit(
             session,
@@ -277,8 +300,8 @@ def before_membership_archive(session, organization, membership, actor_id):
             actor_id,
             "assignment.removed",
             assignment.role_id,
-            codes,
-            [],
+            permissions,
+            {},
             membership.id,
         )
     ensure_administrator(session, organization.id)

@@ -23,8 +23,11 @@ from editingtab_core.authorization.models import (
     RolePermission,
 )
 from editingtab_core.authorization.policy import (
-    MANAGE,
     OWNER_PERMISSIONS,
+    ROLE_ARCHIVE,
+    ROLE_ASSIGN,
+    ROLE_CREATE,
+    ROLE_UPDATE,
     AccessError,
     Conflict,
     Inaccessible,
@@ -239,7 +242,18 @@ def test_normalized_names_reserved_after_archive(identity_session, setup):
 
 def test_limited_manager_cannot_manipulate_more_privileged_roles(identity_session, setup):
     env = setup
-    limited = create(identity_session, env, "Limited manager", [MANAGE])
+    limited = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Limited manager",
+        permissions={
+            ROLE_CREATE: False,
+            ROLE_UPDATE: False,
+            ROLE_ARCHIVE: False,
+            ROLE_ASSIGN: False,
+        },
+    )["id"]
     assign(identity_session, env, limited)
     common = dict(organization_id=env.org, actor_id=env.user)
     attempts = [
@@ -271,6 +285,157 @@ def test_limited_manager_cannot_manipulate_more_privileged_roles(identity_sessio
         with pytest.raises(AccessError):
             attempt()
     assert create(identity_session, env, "Still usable", [])
+
+
+def test_use_permission_is_not_grant_authority_and_delegation_is_explicit(identity_session, setup):
+    env = setup
+    capability_only = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Capability only",
+        permissions={ROLE_CREATE: False, "core.organization.read": False},
+    )["id"]
+    assign(identity_session, env, capability_only)
+
+    with identity_session.begin():
+        assert "core.organization.read" in repo.effective_permissions(
+            identity_session, env.org, env.user
+        )
+        assert "core.organization.read" not in repo.effective_grant_authority(
+            identity_session, env.org, env.user
+        )
+    with pytest.raises(AccessError):
+        access.create_role(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.user,
+            name="Forbidden delegation",
+            permissions={"core.organization.read": False},
+        )
+    with pytest.raises(AccessError):
+        access.create_role(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.user,
+            name="Forbidden onward delegation",
+            permissions={"core.organization.read": True},
+        )
+
+    delegator = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Explicit delegator",
+        permissions={"core.organization.read": True},
+    )["id"]
+    assign(identity_session, env, delegator)
+    created = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.user,
+        name="Allowed delegation",
+        permissions={"core.organization.read": True},
+    )
+    assert created["permissions"] == [{"code": "core.organization.read", "can_grant": True}]
+
+
+@pytest.mark.parametrize(
+    "capability,operation",
+    [
+        (ROLE_CREATE, "create"),
+        (ROLE_UPDATE, "update"),
+        (ROLE_ARCHIVE, "archive"),
+        (ROLE_ASSIGN, "assign"),
+    ],
+)
+def test_granular_role_operations_are_enforced_separately(
+    identity_session, setup, capability, operation
+):
+    env = setup
+    operator = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name=f"Only {operation}",
+        permissions={capability: False},
+    )["id"]
+    assign(identity_session, env, operator)
+    target = create(identity_session, env, f"{operation} target", [])
+    common = {"organization_id": env.org, "actor_id": env.user}
+
+    if operation == "create":
+        access.create_role(identity_session, **common, name="Created", permissions={})
+    elif operation == "update":
+        access.update_role(
+            identity_session, **common, role_id=target, name="Updated", permissions={}
+        )
+    elif operation == "archive":
+        access.archive_role(identity_session, **common, role_id=target)
+    else:
+        access.change_assignment(
+            identity_session, **common, membership_id=env.member, role_id=target
+        )
+
+    denied = {
+        "create": lambda: access.create_role(
+            identity_session, **common, name="Denied create", permissions={}
+        ),
+        "update": lambda: access.update_role(
+            identity_session, **common, role_id=target, name="Denied update", permissions={}
+        ),
+        "archive": lambda: access.archive_role(identity_session, **common, role_id=target),
+        "assign": lambda: access.change_assignment(
+            identity_session, **common, membership_id=env.member, role_id=target
+        ),
+    }
+    other = next(name for name in denied if name != operation)
+    with pytest.raises(AccessError):
+        denied[other]()
+
+
+def test_update_archive_and_assignment_validate_stronger_existing_role(identity_session, setup):
+    env = setup
+    stronger = create(identity_session, env, "Stronger", ["core.members.read"])
+    assign(identity_session, env, stronger)
+    operator = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Narrow administrator",
+        permissions={
+            ROLE_UPDATE: False,
+            ROLE_ARCHIVE: False,
+            ROLE_ASSIGN: False,
+            "core.organization.read": True,
+        },
+    )["id"]
+    assign(identity_session, env, operator)
+    common = {"organization_id": env.org, "actor_id": env.user}
+
+    attempts = [
+        lambda: access.update_role(
+            identity_session,
+            **common,
+            role_id=stronger,
+            name="Seized",
+            permissions={"core.organization.read": False},
+        ),
+        lambda: access.archive_role(identity_session, **common, role_id=stronger),
+        lambda: access.change_assignment(
+            identity_session,
+            **common,
+            membership_id=env.member,
+            role_id=stronger,
+            remove=True,
+        ),
+    ]
+    for attempt in attempts:
+        with pytest.raises(AccessError):
+            attempt()
+    with identity_session.begin():
+        assert identity_session.get(Role, stronger).name == "Stronger"
+        assert identity_session.get(MembershipRole, (env.org, env.member, stronger)) is not None
 
 
 def test_foreign_resources_and_database_ownership(identity_session, setup, integration_settings):
@@ -403,13 +568,14 @@ def test_audit_is_atomic_and_bootstrap_never_regrants(
     with identity_session.begin():
         assert identity_session.scalar(select(func.count()).select_from(RoleAudit)) == before
         assert identity_session.scalar(select(Role.id).where(Role.name == "Rolled back")) is None
+    role = create(identity_session, env, "Audited", ["core.organization.read"])
     access.update_role(
         identity_session,
         organization_id=env.org,
         actor_id=env.owner,
-        role_id=env.owner_role,
-        name="Owner",
-        codes=[MANAGE],
+        role_id=role,
+        name="Audited role",
+        permissions={"core.organization.read": True},
     )
     with pytest.raises(Conflict):
         bootstrap(
@@ -420,10 +586,9 @@ def test_audit_is_atomic_and_bootstrap_never_regrants(
             name="Demo",
         )
     with identity_session.begin():
-        assert repo.effective_permissions(identity_session, env.org, env.owner) == {MANAGE}
         event = identity_session.scalar(select(RoleAudit).where(RoleAudit.action == "role.updated"))
-        assert set(event.permissions_before) == OWNER_PERMISSIONS
-        assert event.permissions_after == [MANAGE]
+        assert event.permissions_before == [{"code": "core.organization.read", "can_grant": False}]
+        assert event.permissions_after == [{"code": "core.organization.read", "can_grant": True}]
         assert event.actor_id == env.owner and event.organization_id == env.org
 
 
@@ -485,13 +650,24 @@ def test_http_security_routes_and_minimal_profiles(identity_session, setup, clie
         )
         profiles = owner.get(root + "/members").json()
         assert all(set(profile) == {"id", "user_id", "display_name"} for profile in profiles)
-        payload = {"name": "HTTP Reader", "permissions": ["core.organization.read"]}
+        payload = {
+            "name": "HTTP Reader",
+            "permissions": [{"code": "core.organization.read", "can_grant": False}],
+        }
         assert owner.post(root + "/roles", json=payload).status_code == 403
         role = owner.post(root + "/roles", json=payload, headers={"Origin": ORIGIN})
         assert role.status_code == 201
         role_id = role.json()["id"]
         assert (
             owner.post(root + "/roles", json=payload, headers={"Origin": ORIGIN}).status_code == 409
+        )
+        duplicate = {
+            "name": "Duplicate",
+            "permissions": payload["permissions"] * 2,
+        }
+        assert (
+            owner.post(root + "/roles", json=duplicate, headers={"Origin": ORIGIN}).status_code
+            == 422
         )
         assert (
             owner.post(

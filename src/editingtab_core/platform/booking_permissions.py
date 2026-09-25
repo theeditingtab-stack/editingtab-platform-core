@@ -8,7 +8,7 @@ from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization.models import MembershipRole, Role
 from editingtab_core.authorization.policy import (
     BOOKING_INVENTORY_PERMISSIONS,
-    MANAGE,
+    ROLE_ASSIGN,
     Conflict,
     Inaccessible,
 )
@@ -43,7 +43,7 @@ def provision(session, *, actor_id, organization_id, membership_id):
         )
         if member is None:
             raise Inaccessible()
-        authorize(session, organization_id, member.user_id, MANAGE)
+        authorize(session, organization_id, member.user_id, ROLE_ASSIGN)
         designated = session.scalar(
             select(Role)
             .where(
@@ -75,17 +75,16 @@ def provision(session, *, actor_id, organization_id, membership_id):
             or named != designated.id
         ):
             raise Conflict()
-        before = repo.role_permissions(session, organization_id, designated.id)
+        before = repo.role_permission_grants(session, organization_id, designated.id)
         # Never remove unrelated privileges or take over a tenant-repurposed role.
-        if not before <= BOOKING_INVENTORY_PERMISSIONS:
+        if not before.keys() <= BOOKING_INVENTORY_PERMISSIONS:
             raise Conflict()
         assignment = session.get(MembershipRole, (organization_id, membership_id, designated.id))
         was_assigned = assignment is not None
-        if before != BOOKING_INVENTORY_PERMISSIONS:
+        after = dict.fromkeys(BOOKING_INVENTORY_PERMISSIONS, False)
+        if before != after:
             designated.updated_at = datetime.now(UTC)
-            repo.replace_permissions(
-                session, organization_id, designated.id, BOOKING_INVENTORY_PERMISSIONS
-            )
+            repo.replace_permissions(session, organization_id, designated.id, after)
             repo.audit(
                 session,
                 organization_id,
@@ -93,7 +92,7 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 "booking.role.provisioned",
                 designated.id,
                 before,
-                BOOKING_INVENTORY_PERMISSIONS,
+                after,
             )
         if not was_assigned:
             session.add(
@@ -109,21 +108,21 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 actor_id,
                 "assignment.added",
                 designated.id,
-                [],
-                BOOKING_INVENTORY_PERMISSIONS,
+                {},
+                after,
                 membership_id,
             )
-        if before != BOOKING_INVENTORY_PERMISSIONS or not was_assigned:
+        if before != after or not was_assigned:
             _audit(
                 session,
                 actor_id=actor_id,
                 organization_id=organization_id,
                 action="booking.permissions.provisioned",
                 target_id=membership_id,
-                before={"permissions": sorted(before), "assigned": was_assigned},
+                before={"permissions": repo.permission_state(before), "assigned": was_assigned},
                 after={
                     "role_id": str(designated.id),
-                    "permissions": sorted(BOOKING_INVENTORY_PERMISSIONS),
+                    "permissions": repo.permission_state(after),
                     "assigned": True,
                 },
             )

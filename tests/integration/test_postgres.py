@@ -10,13 +10,14 @@ from sqlalchemy.orm import Session
 from editingtab_core.app import create_app
 from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.security import Passwords
+from editingtab_core.authorization import repository as authorization_repo
 from editingtab_core.authorization.models import (
     MembershipRole,
     PermissionDefinition,
     Role,
     RolePermission,
 )
-from editingtab_core.authorization.policy import BOOKING_INVENTORY_PERMISSIONS, OWNER_PERMISSIONS
+from editingtab_core.authorization.policy import BOOKING_INVENTORY_PERMISSIONS
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
 
@@ -74,7 +75,16 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
     command.upgrade(migration_config, "0006_booking_authorization")
     from uuid import uuid4
 
-    owned_id, role_id = org_id, uuid4()
+    owned_id, role_id, booking_role_id = org_id, uuid4(), uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO core_roles "
+            "(id, organization_id, name, normalized_name, provisioning_kind) "
+            "VALUES (:id, :org, 'Booking inventory administrator', "
+            "'booking inventory administrator', 'booking_inventory')"
+        ),
+        {"id": booking_role_id, "org": org_id},
+    )
     connection.execute(
         text(
             "INSERT INTO core_roles (id, organization_id, name, normalized_name) "
@@ -89,7 +99,13 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
         ),
         {"org": org_id, "member": member_id, "role": role_id},
     )
-    preserved_codes = OWNER_PERMISSIONS | BOOKING_INVENTORY_PERMISSIONS
+    legacy_owner_permissions = {
+        "core.organization.read",
+        "core.members.read",
+        "core.roles.read",
+        "core.roles.manage",
+    }
+    preserved_codes = legacy_owner_permissions
     for code in preserved_codes:
         connection.execute(
             text(
@@ -98,7 +114,27 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             ),
             {"org": org_id, "role": role_id, "code": code},
         )
+    for code in BOOKING_INVENTORY_PERMISSIONS:
+        connection.execute(
+            text(
+                "INSERT INTO core_role_permissions (organization_id, role_id, code) "
+                "VALUES (:org, :role, :code)"
+            ),
+            {"org": org_id, "role": booking_role_id, "code": code},
+        )
+    command.upgrade(migration_config, "0007_permission_registry")
+    assert (
+        connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0007_permission_registry"
+    )
     command.upgrade(migration_config, "head")
+    granular_operations = {
+        "core.roles.create",
+        "core.roles.update",
+        "core.roles.archive",
+        "core.roles.assign",
+    }
+    migrated_codes = preserved_codes | granular_operations
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         assert session.get(Role, role_id).organization_id == owned_id
         assert (
@@ -113,8 +149,27 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     select(RolePermission.code).where(RolePermission.role_id == role_id)
                 )
             )
-            == preserved_codes
+            == migrated_codes
         )
+        assert (
+            set(
+                session.scalars(
+                    select(RolePermission.code).where(
+                        RolePermission.role_id == role_id,
+                        RolePermission.can_grant.is_(True),
+                    )
+                )
+            )
+            == migrated_codes
+        )
+        assert dict(
+            session.execute(
+                select(RolePermission.code, RolePermission.can_grant).where(
+                    RolePermission.role_id == booking_role_id
+                )
+            ).all()
+        ) == dict.fromkeys(BOOKING_INVENTORY_PERMISSIONS, False)
+        assert authorization_repo.has_administrator(session, org_id)
         definitions = session.scalars(select(PermissionDefinition)).all()
         assert len(definitions) == 20
         assert {row.code for row in definitions} >= preserved_codes
@@ -125,28 +180,11 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0007_permission_registry"
+    assert expected_head == "0008_delegated_grant_authority"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
     assert f"{expected_head} (head)" in output.getvalue()
-    command.downgrade(migration_config, "0006_booking_authorization")
-    assert (
-        connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0006_booking_authorization"
-    )
-    assert "core_permission_definitions" not in inspect(connection).get_table_names(schema=schema)
-    assert {
-        row[0]
-        for row in connection.execute(
-            text("SELECT code FROM core_role_permissions WHERE role_id = :role"),
-            {"role": role_id},
-        )
-    } == preserved_codes
-    command.upgrade(migration_config, "head")
-    assert connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == [
-        expected_head
-    ]
     inspector = inspect(connection)
     assert set(inspector.get_table_names(schema=schema)) == {
         "alembic_version",
@@ -167,6 +205,24 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
     assert all(
         foreign_key["options"]["ondelete"] == "RESTRICT"
         for foreign_key in inspector.get_foreign_keys("core_memberships", schema=schema)
+    )
+
+
+def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connection):
+    command.upgrade(migration_config, "head")
+    command.downgrade(migration_config, "0007_permission_registry")
+    assert (
+        migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0007_permission_registry"
+    )
+    assert "can_grant" not in {
+        column["name"]
+        for column in inspect(migration_connection).get_columns("core_role_permissions")
+    }
+    command.upgrade(migration_config, "head")
+    assert (
+        migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0008_delegated_grant_authority"
     )
 
 

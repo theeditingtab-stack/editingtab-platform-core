@@ -9,7 +9,7 @@ from editingtab_core.authorization.models import (
     RoleAudit,
     RolePermission,
 )
-from editingtab_core.authorization.policy import MANAGE
+from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS
 from editingtab_core.identity.models import Membership, Organization, User
 
 
@@ -70,6 +70,16 @@ def effective_permissions(session, organization_id, actor_id):
     return frozenset(session.scalars(permission_query(organization_id).where(User.id == actor_id)))
 
 
+def effective_grant_authority(session, organization_id, actor_id):
+    return frozenset(
+        session.scalars(
+            permission_query(organization_id).where(
+                User.id == actor_id, RolePermission.can_grant.is_(True)
+            )
+        )
+    )
+
+
 def assignable_permission_codes(session, codes):
     requested = frozenset(codes)
     if not requested:
@@ -98,12 +108,15 @@ def permission_catalog(session):
 
 
 def has_administrator(session, organization_id):
-    return (
-        session.scalar(
-            permission_query(organization_id).where(RolePermission.code == MANAGE).limit(1)
-        )
-        is not None
-    )
+    user_ids = session.scalars(active_members(organization_id).with_only_columns(User.id)).all()
+    for user_id in user_ids:
+        if ADMINISTRATOR_PERMISSIONS <= effective_permissions(
+            session, organization_id, user_id
+        ) and ADMINISTRATOR_PERMISSIONS <= effective_grant_authority(
+            session, organization_id, user_id
+        ):
+            return True
+    return False
 
 
 def role_permissions(session, organization_id, role_id):
@@ -116,17 +129,40 @@ def role_permissions(session, organization_id, role_id):
     )
 
 
-def replace_permissions(session, organization_id, role_id, codes):
+def role_permission_grants(session, organization_id, role_id):
+    return {
+        code: can_grant
+        for code, can_grant in session.execute(
+            select(RolePermission.code, RolePermission.can_grant).where(
+                RolePermission.organization_id == organization_id,
+                RolePermission.role_id == role_id,
+            )
+        )
+    }
+
+
+def replace_permissions(session, organization_id, role_id, permissions):
     session.execute(
         delete(RolePermission).where(
             RolePermission.organization_id == organization_id, RolePermission.role_id == role_id
         )
     )
     session.add_all(
-        RolePermission(organization_id=organization_id, role_id=role_id, code=code)
-        for code in sorted(codes)
+        RolePermission(
+            organization_id=organization_id,
+            role_id=role_id,
+            code=code,
+            can_grant=permissions[code],
+        )
+        for code in sorted(permissions)
     )
     session.flush()
+
+
+def permission_state(permissions):
+    return [
+        {"code": code, "can_grant": can_grant} for code, can_grant in sorted(permissions.items())
+    ]
 
 
 def audit(session, organization_id, actor_id, action, role_id, before, after, membership_id=None):
@@ -137,8 +173,8 @@ def audit(session, organization_id, actor_id, action, role_id, before, after, me
             action=action,
             target_id=role_id,
             membership_id=membership_id,
-            permissions_before=sorted(before),
-            permissions_after=sorted(after),
+            permissions_before=permission_state(before),
+            permissions_after=permission_state(after),
         )
     )
     session.flush()
