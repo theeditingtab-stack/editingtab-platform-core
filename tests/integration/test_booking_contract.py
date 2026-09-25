@@ -20,6 +20,7 @@ from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization import services as access
 from editingtab_core.authorization.models import Role, RoleAudit
 from editingtab_core.authorization.policy import (
+    BOOKING_INVENTORY_PERMISSIONS,
     BOOKING_PERMISSIONS,
     AccessError,
     Conflict,
@@ -273,10 +274,27 @@ def test_permission_entitlement_and_revocation_without_relogin(identity_session,
         error(request(client, env), 401, "invalid_user_session")
 
 
+@pytest.mark.parametrize("permission", sorted(BOOKING_PERMISSIONS - {READ}))
+def test_final_booking_permission_vocabulary_is_recognized(
+    identity_session, env, clients, permission
+):
+    with clients() as client:
+        error(
+            request(
+                client,
+                env,
+                body={"organization_id": str(env.org), "permission": permission},
+            ),
+            403,
+            "permission_denied",
+        )
+
+
 @pytest.mark.parametrize(
     "change",
     [
         {"permission": "core.roles.manage"},
+        {"permission": "platform.admin"},
         {"permission": "booking.unknown"},
         {"actor_id": "forged"},
         {"organization_id": "bad"},
@@ -313,7 +331,7 @@ def test_provisioning_idempotent_audit_and_tenant_delegation(identity_session, e
         )
         assert audit.actor_id == env.operator and audit.target_id == env.member
         assert audit.before == {"assigned": False, "permissions": []}
-        assert set(audit.after["permissions"]) == BOOKING_PERMISSIONS
+        assert set(audit.after["permissions"]) == BOOKING_INVENTORY_PERMISSIONS
         count = identity_session.scalar(select(func.count()).select_from(RoleAudit))
     assert grant(identity_session, env) == result
     with identity_session.begin():
@@ -420,7 +438,7 @@ def test_provisioning_atomic_failure_and_designated_role_collision(identity_sess
         actor_id=env.owner,
         role_id=role,
         name=ROLE_NAME,
-        codes=[*BOOKING_PERMISSIONS, "core.roles.manage"],
+        codes=[*BOOKING_INVENTORY_PERMISSIONS, "core.roles.manage"],
     )
     with pytest.raises(Conflict):
         grant(identity_session, env)
@@ -455,7 +473,7 @@ def test_designated_role_is_not_silently_restored_or_repurposed(identity_session
             actor_id=env.owner,
             role_id=role,
             name="Tenant repurposed",
-            codes=BOOKING_PERMISSIONS,
+            codes=BOOKING_INVENTORY_PERMISSIONS,
         )
     else:
         access.archive_role(
@@ -479,7 +497,9 @@ def test_explicit_reprovision_can_restore_only_designated_booking_permissions(
     )
     grant(identity_session, env)
     with identity_session.begin():
-        assert repo.role_permissions(identity_session, env.org, role) == BOOKING_PERMISSIONS
+        assert (
+            repo.role_permissions(identity_session, env.org, role) == BOOKING_INVENTORY_PERMISSIONS
+        )
         audits = identity_session.scalars(
             select(PlatformAudit).where(PlatformAudit.action == "booking.permissions.provisioned")
         ).all()

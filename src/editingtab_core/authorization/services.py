@@ -16,7 +16,6 @@ from editingtab_core.authorization.policy import (
     InvalidPermission,
     LastAdministrator,
     StorageUnavailable,
-    permissions,
     role_name,
 )
 from editingtab_core.identity.models import Membership, Organization, User
@@ -43,7 +42,8 @@ def transaction(session):
 
 
 def authorize(session, organization_id, actor_id, code, *, lock=False):
-    permissions([code])
+    if repo.assignable_permission_codes(session, [code]) != {code}:
+        raise InvalidPermission()
     query = select(Organization).where(
         Organization.id == organization_id, Organization.deleted_at.is_(None)
     )
@@ -75,6 +75,13 @@ def _role(session, organization_id, role_id, *, archived=False):
 def _grantable(held, codes):
     if not codes <= held:
         raise AccessError()
+
+
+def _permissions(session, values):
+    result = frozenset(values)
+    if repo.assignable_permission_codes(session, result) != result:
+        raise InvalidPermission()
+    return result
 
 
 def ensure_administrator(session, organization_id):
@@ -150,10 +157,24 @@ def list_roles(session, *, organization_id, actor_id, limit=50, offset=0):
         return [_role_info(session, role) for role in roles]
 
 
+def list_permission_catalog(session, *, organization_id, actor_id):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, "core.roles.read")
+        return [
+            {
+                "code": definition.code,
+                "module": definition.module,
+                "description": definition.description,
+                "lifecycle": definition.lifecycle,
+            }
+            for definition in repo.permission_catalog(session)
+        ]
+
+
 def create_role(session, *, organization_id, actor_id, name, codes):
     with transaction(session):
         _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
-        selected = permissions(codes)
+        selected = _permissions(session, codes)
         _grantable(held, selected)
         display, normalized = role_name(name)
         role = Role(organization_id=organization_id, name=display, normalized_name=normalized)
@@ -169,7 +190,7 @@ def update_role(session, *, organization_id, actor_id, role_id, name, codes):
         _, held = authorize(session, organization_id, actor_id, MANAGE, lock=True)
         role = _role(session, organization_id, role_id)
         before = repo.role_permissions(session, organization_id, role_id)
-        after = permissions(codes)
+        after = _permissions(session, codes)
         _grantable(held, before | after)
         role.name, role.normalized_name = role_name(name)
         role.updated_at = datetime.now(UTC)

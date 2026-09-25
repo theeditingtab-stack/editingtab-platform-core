@@ -10,8 +10,13 @@ from sqlalchemy.orm import Session
 from editingtab_core.app import create_app
 from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.security import Passwords
-from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
-from editingtab_core.authorization.policy import OWNER_PERMISSIONS
+from editingtab_core.authorization.models import (
+    MembershipRole,
+    PermissionDefinition,
+    Role,
+    RolePermission,
+)
+from editingtab_core.authorization.policy import BOOKING_INVENTORY_PERMISSIONS, OWNER_PERMISSIONS
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
 
@@ -66,7 +71,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     password_hash=Passwords().hash("synthetic preserved password"),
                 )
             )
-    command.upgrade(migration_config, "0005_platform_onboarding")
+    command.upgrade(migration_config, "0006_booking_authorization")
     from uuid import uuid4
 
     owned_id, role_id = org_id, uuid4()
@@ -84,7 +89,8 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
         ),
         {"org": org_id, "member": member_id, "role": role_id},
     )
-    for code in OWNER_PERMISSIONS:
+    preserved_codes = OWNER_PERMISSIONS | BOOKING_INVENTORY_PERMISSIONS
+    for code in preserved_codes:
         connection.execute(
             text(
                 "INSERT INTO core_role_permissions (organization_id, role_id, code) "
@@ -107,8 +113,11 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     select(RolePermission.code).where(RolePermission.role_id == role_id)
                 )
             )
-            == OWNER_PERMISSIONS
+            == preserved_codes
         )
+        definitions = session.scalars(select(PermissionDefinition)).all()
+        assert len(definitions) == 20
+        assert {row.code for row in definitions} >= preserved_codes
         assert session.get(User, existing_id).email == "preserved@example.test"
         assert session.get(Membership, member_id).user_id == existing_id
         assert Passwords().verify(
@@ -116,11 +125,24 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0006_booking_authorization"
+    assert expected_head == "0007_permission_registry"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
     assert f"{expected_head} (head)" in output.getvalue()
+    command.downgrade(migration_config, "0006_booking_authorization")
+    assert (
+        connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0006_booking_authorization"
+    )
+    assert "core_permission_definitions" not in inspect(connection).get_table_names(schema=schema)
+    assert {
+        row[0]
+        for row in connection.execute(
+            text("SELECT code FROM core_role_permissions WHERE role_id = :role"),
+            {"role": role_id},
+        )
+    } == preserved_codes
     command.upgrade(migration_config, "head")
     assert connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == [
         expected_head

@@ -2,7 +2,13 @@
 
 from sqlalchemy import and_, delete, select
 
-from editingtab_core.authorization.models import MembershipRole, Role, RoleAudit, RolePermission
+from editingtab_core.authorization.models import (
+    MembershipRole,
+    PermissionDefinition,
+    Role,
+    RoleAudit,
+    RolePermission,
+)
 from editingtab_core.authorization.policy import MANAGE
 from editingtab_core.identity.models import Membership, Organization, User
 
@@ -62,6 +68,33 @@ def permission_query(organization_id):
 
 def effective_permissions(session, organization_id, actor_id):
     return frozenset(session.scalars(permission_query(organization_id).where(User.id == actor_id)))
+
+
+def assignable_permission_codes(session, codes):
+    requested = frozenset(codes)
+    if not requested:
+        return requested
+    found = frozenset(
+        session.scalars(
+            select(PermissionDefinition.code).where(
+                PermissionDefinition.code.in_(requested),
+                PermissionDefinition.organization_assignable.is_(True),
+                PermissionDefinition.lifecycle == "active",
+            )
+        )
+    )
+    return found
+
+
+def permission_catalog(session):
+    return session.scalars(
+        select(PermissionDefinition)
+        .where(
+            PermissionDefinition.organization_assignable.is_(True),
+            PermissionDefinition.lifecycle == "active",
+        )
+        .order_by(PermissionDefinition.module, PermissionDefinition.code)
+    )
 
 
 def has_administrator(session, organization_id):

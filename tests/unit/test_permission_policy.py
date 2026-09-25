@@ -1,10 +1,10 @@
 import pytest
 
 from editingtab_core.authorization.policy import (
-    CATALOG,
+    BOOKING_INVENTORY_PERMISSIONS,
+    BOOKING_PERMISSIONS,
     OWNER_PERMISSIONS,
     InvalidPermission,
-    permissions,
     role_name,
 )
 
@@ -17,9 +17,13 @@ def test_owner_is_explicit_and_no_platform_permissions():
         "core.roles.manage",
     }
     assert OWNER_PERMISSIONS == expected
-    assert CATALOG == expected | {"booking.inventory.read", "booking.inventory.manage"}
-    with pytest.raises(InvalidPermission):
-        permissions(["platform.admin"])
+    assert BOOKING_INVENTORY_PERMISSIONS == {
+        "booking.inventory.read",
+        "booking.inventory.manage",
+    }
+    assert BOOKING_INVENTORY_PERMISSIONS < BOOKING_PERMISSIONS
+    assert all(code.startswith("booking.") for code in BOOKING_PERMISSIONS)
+    assert all(not code.startswith("platform.") for code in OWNER_PERMISSIONS)
 
 
 @pytest.mark.parametrize("name", ["", " ", "x" * 101, "New\nrole", "R\u00f4le"])

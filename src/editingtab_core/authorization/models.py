@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -17,8 +18,40 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from editingtab_core.authorization.policy import CATALOG
 from editingtab_core.identity.models import Base
+
+
+class PermissionDefinition(Base):
+    __tablename__ = "core_permission_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "code",
+            "organization_assignable",
+            "lifecycle",
+            name="uq_core_permission_definitions_assignment",
+        ),
+        CheckConstraint(
+            "code ~ '^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$'",
+            name="ck_core_permission_definitions_code",
+        ),
+        CheckConstraint(
+            "module ~ '^[a-z][a-z0-9_]*$' AND code LIKE module || '.%'",
+            name="ck_core_permission_definitions_module",
+        ),
+        CheckConstraint(
+            "description = btrim(description) AND length(description) > 0",
+            name="ck_core_permission_definitions_description",
+        ),
+        CheckConstraint(
+            "lifecycle IN ('active', 'deprecated')",
+            name="ck_core_permission_definitions_lifecycle",
+        ),
+    )
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    module: Mapped[str] = mapped_column(String(32), index=True)
+    description: Mapped[str] = mapped_column(String(255))
+    organization_assignable: Mapped[bool] = mapped_column(Boolean)
+    lifecycle: Mapped[str] = mapped_column(String(16))
 
 
 class Role(Base):
@@ -58,14 +91,35 @@ class RolePermission(Base):
             ["core_roles.id", "core_roles.organization_id"],
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["code", "definition_organization_assignable", "definition_lifecycle"],
+            [
+                "core_permission_definitions.code",
+                "core_permission_definitions.organization_assignable",
+                "core_permission_definitions.lifecycle",
+            ],
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+            name="fk_core_role_permissions_assignable_definition",
+        ),
         CheckConstraint(
-            "code IN (" + ", ".join(repr(code) for code in sorted(CATALOG)) + ")",
-            name="ck_core_role_permissions_catalog",
+            "definition_organization_assignable",
+            name="ck_core_role_permissions_organization_assignable",
+        ),
+        CheckConstraint(
+            "definition_lifecycle = 'active'",
+            name="ck_core_role_permissions_active",
         ),
     )
     organization_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     role_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_organization_assignable: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true"
+    )
+    definition_lifecycle: Mapped[str] = mapped_column(
+        String(16), default="active", server_default="active"
+    )
 
 
 class MembershipRole(Base):

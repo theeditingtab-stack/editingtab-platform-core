@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from editingtab_core.auth.security import COOKIE_NAME
 from editingtab_core.auth.services import current_user
 from editingtab_core.authorization import services
-from editingtab_core.authorization.policy import CATALOG
 from editingtab_core.database import get_session
 
 router = APIRouter(prefix="/organizations")
@@ -29,7 +28,7 @@ Actor = Annotated[UUID, Depends(actor)]
 class RoleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
-    permissions: list[str] = Field(max_length=len(CATALOG))
+    permissions: list[str] = Field(max_length=100)
 
 
 @router.get("")
@@ -57,6 +56,13 @@ def roles(
 ):
     return services.list_roles(
         session, organization_id=organization_id, actor_id=actor_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/{organization_id}/permissions")
+def permissions(organization_id: UUID, session: Database, actor_id: Actor):
+    return services.list_permission_catalog(
+        session, organization_id=organization_id, actor_id=actor_id
     )
 
 
