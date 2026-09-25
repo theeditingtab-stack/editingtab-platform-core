@@ -12,6 +12,9 @@ from alembic.config import Config
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from editingtab_core.auth import services as auth_services
+from editingtab_core.auth.provision import provision_user
+from editingtab_core.auth.security import AuthenticationError, Passwords
 from editingtab_core.authorization import repository, services
 from editingtab_core.authorization.bootstrap import bootstrap
 from editingtab_core.authorization.models import Role
@@ -324,4 +327,105 @@ def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
                 text("SELECT completed_at IS NOT NULL FROM core_platform_bootstrap WHERE id = 1")
             )
             is True
+        )
+
+
+def test_concurrent_invitation_acceptance_creates_one_account_and_membership(
+    integration_engine, integration_settings, shared_schema
+):
+    passwords = Passwords()
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        owner = provision_user(
+            session,
+            settings=integration_settings,
+            passwords=passwords,
+            email="invite-owner@example.test",
+            display_name="Invite Owner",
+            password="test-only owner password long enough",
+        )
+        org = bootstrap(
+            session,
+            settings=integration_settings,
+            email="invite-owner@example.test",
+            slug="concurrent-invite",
+            name="Concurrent invite",
+        )
+        invitation = auth_services.create_invitation(
+            session,
+            settings=integration_settings,
+            organization_id=org,
+            actor_id=owner,
+            email="concurrent-employee@example.test",
+        )
+    pids = Queue()
+
+    def accept():
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.commit()
+            pids.put(pid)
+            with Session(connection) as session:
+                try:
+                    auth_services.accept_invitation(
+                        session,
+                        passwords=passwords,
+                        token=invitation["token"],
+                        email="concurrent-employee@example.test",
+                        display_name="Concurrent Employee",
+                        password="test-only employee password long enough",
+                    )
+                    return "accepted"
+                except AuthenticationError:
+                    return "rejected"
+
+    with scoped_connection(integration_engine, shared_schema) as gate:
+        gate.execute(
+            text("SELECT id FROM core_organization_invitations WHERE id = :id FOR UPDATE"),
+            {"id": invitation["id"]},
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(accept) for _ in range(2)]
+            try:
+                worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
+                deadline = time.monotonic() + 2
+                with integration_engine.connect() as observer:
+                    while True:
+                        waiting = [
+                            observer.scalar(
+                                text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                {"pid": pid},
+                            )
+                            for pid in worker_pids
+                        ]
+                        if all(waiting):
+                            break
+                        assert time.monotonic() < deadline, (
+                            "Invitation workers did not reach concurrent lock"
+                        )
+            finally:
+                gate.rollback()
+            assert sorted(future.result(timeout=10) for future in futures) == [
+                "accepted",
+                "rejected",
+            ]
+    with scoped_connection(integration_engine, shared_schema) as connection:
+        assert (
+            connection.scalar(
+                text("SELECT count(*) FROM core_users WHERE normalized_email = :email"),
+                {"email": "concurrent-employee@example.test"},
+            )
+            == 1
+        )
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM core_memberships m JOIN core_users u ON u.id = m.user_id "
+                    "WHERE m.organization_id = :org AND u.normalized_email = :email"
+                ),
+                {"org": org, "email": "concurrent-employee@example.test"},
+            )
+            == 1
         )
