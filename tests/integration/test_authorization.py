@@ -15,7 +15,13 @@ from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization import services as access
 from editingtab_core.authorization.bootstrap import bootstrap
-from editingtab_core.authorization.models import MembershipRole, Role, RoleAudit, RolePermission
+from editingtab_core.authorization.models import (
+    MembershipRole,
+    PermissionDefinition,
+    Role,
+    RoleAudit,
+    RolePermission,
+)
 from editingtab_core.authorization.policy import (
     MANAGE,
     OWNER_PERMISSIONS,
@@ -141,6 +147,81 @@ def test_union_deny_default_and_unknown_permissions(identity_session, setup):
         with pytest.raises(IntegrityError):
             identity_session.flush()
         identity_session.rollback()
+
+
+@pytest.mark.parametrize(
+    "organization_assignable,lifecycle",
+    [(True, "deprecated"), (False, "active")],
+)
+def test_registry_rejects_unassignable_definitions(
+    identity_session, setup, organization_assignable, lifecycle
+):
+    code = f"core.restricted.{lifecycle}" if organization_assignable else "core.internal.manage"
+    with identity_session.begin():
+        identity_session.add(
+            PermissionDefinition(
+                code=code,
+                module="core",
+                description="Test-only restricted definition.",
+                organization_assignable=organization_assignable,
+                lifecycle=lifecycle,
+            )
+        )
+    with pytest.raises(InvalidPermission):
+        create(identity_session, setup, f"Rejected {lifecycle}", [code])
+    with pytest.raises(IntegrityError), identity_session.begin():
+        identity_session.add(
+            RolePermission(organization_id=setup.org, role_id=setup.owner_role, code=code)
+        )
+        identity_session.flush()
+
+
+def test_permission_definition_code_is_globally_unique(identity_session):
+    with pytest.raises(IntegrityError), identity_session.begin():
+        identity_session.add(
+            PermissionDefinition(
+                code="core.roles.read",
+                module="core",
+                description="Duplicate.",
+                organization_assignable=True,
+                lifecycle="active",
+            )
+        )
+        identity_session.flush()
+
+
+def test_permission_catalog_is_protected_deterministic_and_tenant_scoped(
+    identity_session, setup, clients, integration_settings
+):
+    expected = access.list_permission_catalog(
+        identity_session, organization_id=setup.org, actor_id=setup.owner
+    )
+    assert [row["code"] for row in expected] == sorted(
+        (row["code"] for row in expected), key=lambda code: (code.split(".", 1)[0], code)
+    )
+    assert all(row["lifecycle"] == "active" for row in expected)
+    assert all(row["module"] != "platform" for row in expected)
+    assert "booking.reservations.cancel" in {row["code"] for row in expected}
+
+    other = bootstrap(
+        identity_session,
+        settings=integration_settings,
+        email="owner@example.test",
+        slug="catalog-other",
+        name="Catalog other",
+    )
+    root = f"/organizations/{setup.org}/permissions"
+    with (
+        clients(authenticated=False) as anonymous,
+        clients() as owner,
+        clients("member@example.test") as member,
+    ):
+        assert anonymous.get(root).status_code == 401
+        response = owner.get(root)
+        assert response.status_code == 200
+        assert response.json() == expected
+        assert member.get(root).status_code == 403
+        assert member.get(f"/organizations/{other}/permissions").status_code == 404
 
 
 def test_normalized_names_reserved_after_archive(identity_session, setup):

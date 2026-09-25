@@ -17,7 +17,7 @@ X-Core-Session: <existing opaque Core user session token>
 {"organization_id":"<UUID>","permission":"booking.inventory.read"}
 ```
 
-Only `booking.inventory.read` and `booking.inventory.manage` are accepted. No actor/user ID, additional fields, or other module/Core permissions are accepted. The body is bounded to 4096 bytes. Duplicate credential headers are rejected. Browser cookies never authenticate this endpoint. Origin is not required on this exact service-authenticated route; all existing browser mutation Origin checks remain unchanged.
+The endpoint accepts only the reviewed Booking permissions registered by CORE-AUTH-001: inventory read/manage; reservation read/create/update/cancel; availability read; safari read/manage; and settings read/manage. Exact codes are listed in the [permission registry](core-auth-001-permission-registry.md). No actor/user ID, additional fields, or other module/Core permissions are accepted. The body is bounded to 4096 bytes. Duplicate credential headers are rejected. Browser cookies never authenticate this endpoint. Origin is not required on this exact service-authenticated route; all existing browser mutation Origin checks remain unchanged.
 
 Success is HTTP 200 with exactly:
 
@@ -69,7 +69,7 @@ The public production gateway must not route `/internal` paths. Restrict the pri
 
 ## Explicit initial Booking permission delegation
 
-Migration `0006_booking_authorization` expands the permission CHECK constraint and adds nullable role provenance with a per-organization uniqueness constraint. It grants nothing. Existing and newly created owner roles retain their four explicit Core permissions, and enabling Booking grants no user permission.
+Historical migration `0006_booking_authorization` added the initial two Booking inventory codes and nullable role provenance. Migration `0007_permission_registry` replaces the enumerated permission CHECK with the Core-owned registry and registers the final reviewed vocabulary. Neither migration grants a permission. Existing and newly created owner roles retain their four explicit Core permissions, and enabling Booking grants no user permission.
 
 A platform operator explicitly calls:
 
@@ -111,7 +111,7 @@ Use the existing operator, owner, organization and enabled entitlement. Do not r
    uv run --locked python scripts/init-booking-credential.py
    ```
 
-   Expected head: `0006_booking_authorization`. Neither command was run against development by Codex.
+   Expected head: `0007_permission_registry`. Neither command was run against development by Codex.
 
 2. **Restart the API yourself in terminal A and leave it running.** Stop the previous process with Ctrl+C; load only the digest without printing it. Environment settings in terminal B do not configure terminal A.
 

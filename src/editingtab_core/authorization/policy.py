@@ -1,13 +1,17 @@
-"""Explicit catalog: adding features requires deliberately adding permissions."""
+"""Stable authorization constants; assignable definitions live in PostgreSQL."""
 
-BOOKING_PERMISSIONS = frozenset({"booking.inventory.read", "booking.inventory.manage"})
-
-CATALOG = BOOKING_PERMISSIONS | frozenset(
+BOOKING_INVENTORY_PERMISSIONS = frozenset({"booking.inventory.read", "booking.inventory.manage"})
+BOOKING_PERMISSIONS = BOOKING_INVENTORY_PERMISSIONS | frozenset(
     {
-        "core.organization.read",
-        "core.members.read",
-        "core.roles.read",
-        "core.roles.manage",
+        "booking.reservations.read",
+        "booking.reservations.create",
+        "booking.reservations.update",
+        "booking.reservations.cancel",
+        "booking.availability.read",
+        "booking.safari.read",
+        "booking.safari.manage",
+        "booking.settings.read",
+        "booking.settings.manage",
     }
 )
 OWNER_PERMISSIONS = frozenset(
@@ -48,13 +52,6 @@ class LastAdministrator(Conflict):
 class StorageUnavailable(AccessError):
     status = 503
     message = "Organization operation unavailable."
-
-
-def permissions(values):
-    result = frozenset(values)
-    if not result <= CATALOG:
-        raise InvalidPermission()
-    return result
 
 
 def role_name(value):

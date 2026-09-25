@@ -6,7 +6,12 @@ from sqlalchemy import select
 
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization.models import MembershipRole, Role
-from editingtab_core.authorization.policy import BOOKING_PERMISSIONS, MANAGE, Conflict, Inaccessible
+from editingtab_core.authorization.policy import (
+    BOOKING_INVENTORY_PERMISSIONS,
+    MANAGE,
+    Conflict,
+    Inaccessible,
+)
 from editingtab_core.authorization.services import authorize, transaction
 from editingtab_core.identity.models import Membership, User
 from editingtab_core.platform.services import (
@@ -72,13 +77,15 @@ def provision(session, *, actor_id, organization_id, membership_id):
             raise Conflict()
         before = repo.role_permissions(session, organization_id, designated.id)
         # Never remove unrelated privileges or take over a tenant-repurposed role.
-        if not before <= BOOKING_PERMISSIONS:
+        if not before <= BOOKING_INVENTORY_PERMISSIONS:
             raise Conflict()
         assignment = session.get(MembershipRole, (organization_id, membership_id, designated.id))
         was_assigned = assignment is not None
-        if before != BOOKING_PERMISSIONS:
+        if before != BOOKING_INVENTORY_PERMISSIONS:
             designated.updated_at = datetime.now(UTC)
-            repo.replace_permissions(session, organization_id, designated.id, BOOKING_PERMISSIONS)
+            repo.replace_permissions(
+                session, organization_id, designated.id, BOOKING_INVENTORY_PERMISSIONS
+            )
             repo.audit(
                 session,
                 organization_id,
@@ -86,7 +93,7 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 "booking.role.provisioned",
                 designated.id,
                 before,
-                BOOKING_PERMISSIONS,
+                BOOKING_INVENTORY_PERMISSIONS,
             )
         if not was_assigned:
             session.add(
@@ -103,10 +110,10 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 "assignment.added",
                 designated.id,
                 [],
-                BOOKING_PERMISSIONS,
+                BOOKING_INVENTORY_PERMISSIONS,
                 membership_id,
             )
-        if before != BOOKING_PERMISSIONS or not was_assigned:
+        if before != BOOKING_INVENTORY_PERMISSIONS or not was_assigned:
             _audit(
                 session,
                 actor_id=actor_id,
@@ -116,7 +123,7 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 before={"permissions": sorted(before), "assigned": was_assigned},
                 after={
                     "role_id": str(designated.id),
-                    "permissions": sorted(BOOKING_PERMISSIONS),
+                    "permissions": sorted(BOOKING_INVENTORY_PERMISSIONS),
                     "assigned": True,
                 },
             )
@@ -124,5 +131,5 @@ def provision(session, *, actor_id, organization_id, membership_id):
             "organization_id": organization_id,
             "membership_id": membership_id,
             "role_id": designated.id,
-            "permissions": sorted(BOOKING_PERMISSIONS),
+            "permissions": sorted(BOOKING_INVENTORY_PERMISSIONS),
         }
