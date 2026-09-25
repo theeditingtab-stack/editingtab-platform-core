@@ -154,6 +154,111 @@ def test_concurrent_removal_cannot_remove_both_administrators(
         )
 
 
+def test_concurrent_archive_cannot_archive_both_administrators(
+    integration_engine, integration_settings, shared_schema
+):
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        first = identity.create_user(
+            session, email="archive-first@example.test", display_name="First"
+        )
+        second = identity.create_user(
+            session, email="archive-second@example.test", display_name="Second"
+        )
+        org = bootstrap(
+            session,
+            settings=integration_settings,
+            email="archive-first@example.test",
+            slug="concurrent-archive",
+            name="Concurrent archive",
+        )
+        second_member = identity.add_membership(session, organization_id=org, user_id=second)
+        with session.begin():
+            role = session.scalar(select(Role.id).where(Role.organization_id == org))
+            first_member = session.scalar(
+                select(Membership.id).where(
+                    Membership.organization_id == org, Membership.user_id == first
+                )
+            )
+        services.change_assignment(
+            session, organization_id=org, actor_id=first, membership_id=second_member, role_id=role
+        )
+    pids = Queue()
+
+    def archive_self(actor, member):
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.commit()
+            pids.put(pid)
+            with Session(connection) as session:
+                try:
+                    services.archive_member(
+                        session,
+                        organization_id=org,
+                        actor_id=actor,
+                        membership_id=member,
+                    )
+                    return "archived"
+                except LastAdministrator:
+                    return "protected"
+
+    with scoped_connection(integration_engine, shared_schema) as gate:
+        gate.execute(
+            text("SELECT id FROM core_organizations WHERE id = :id FOR UPDATE"), {"id": org}
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [
+                workers.submit(archive_self, first, first_member),
+                workers.submit(archive_self, second, second_member),
+            ]
+            try:
+                worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
+                deadline = time.monotonic() + 2
+                with integration_engine.connect() as observer:
+                    while True:
+                        waiting = [
+                            observer.scalar(
+                                text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), {"pid": pid}
+                            )
+                            for pid in worker_pids
+                        ]
+                        if all(waiting):
+                            break
+                        assert time.monotonic() < deadline, (
+                            "Archive workers did not reach concurrent locks"
+                        )
+                        time.sleep(0.01)
+            finally:
+                gate.rollback()
+            assert sorted(future.result(timeout=5) for future in futures) == [
+                "archived",
+                "protected",
+            ]
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        assert repository.has_administrator(session, org)
+        assert (
+            session.scalar(
+                select(text("count(*)"))
+                .select_from(Membership)
+                .where(Membership.organization_id == org, Membership.deleted_at.is_not(None))
+            )
+            == 1
+        )
+        assert (
+            session.scalar(
+                select(text("count(*)"))
+                .select_from(text("core_role_audit"))
+                .where(text("action = 'member.archived'"))
+            )
+            == 1
+        )
+
+
 def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
     integration_engine, shared_schema
 ):

@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization.models import MembershipRole, Role
 from editingtab_core.authorization.policy import (
+    MEMBER_MANAGE,
     ROLE_ARCHIVE,
     ROLE_ASSIGN,
     ROLE_CREATE,
@@ -115,6 +116,20 @@ def _role_info(session, role):
     }
 
 
+def _member_info(session, membership, user):
+    return {
+        "membership_id": membership.id,
+        "user_id": user.id,
+        "display_name": user.display_name,
+        "email": user.email,
+        "state": "archived" if membership.deleted_at is not None else "active",
+        "roles": [
+            _role_info(session, role)
+            for role in repo.membership_roles(session, membership.organization_id, membership.id)
+        ],
+    }
+
+
 def _page(limit, offset):
     if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
         raise InvalidPermission()
@@ -152,12 +167,148 @@ def list_members(session, *, organization_id, actor_id, limit=50, offset=0):
     with transaction(session):
         authorize(session, organization_id, actor_id, "core.members.read")
         rows = session.execute(
-            repo.active_members(organization_id).order_by(Membership.id).limit(limit).offset(offset)
+            repo.members(organization_id).order_by(Membership.id).limit(limit).offset(offset)
         )
-        return [
-            {"id": member.id, "user_id": user.id, "display_name": user.display_name}
-            for member, user in rows
-        ]
+        return [_member_info(session, member, user) for member, user in rows]
+
+
+def read_member(session, *, organization_id, actor_id, membership_id):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, "core.members.read")
+        row = session.execute(
+            repo.members(organization_id).where(Membership.id == membership_id)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        return _member_info(session, *row)
+
+
+def _initial_roles(session, organization_id, actor_id, role_ids):
+    requested = list(role_ids)
+    if len(requested) != len(set(requested)):
+        raise InvalidPermission()
+    if not requested:
+        return []
+    authorize(session, organization_id, actor_id, ROLE_ASSIGN)
+    grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+    roles = []
+    for role_id in requested:
+        role = _role(session, organization_id, role_id)
+        _grantable(
+            grant_authority,
+            repo.role_permission_grants(session, organization_id, role_id),
+        )
+        roles.append(role)
+    return roles
+
+
+def _activate_member(session, organization_id, actor_id, membership, user, roles):
+    action = None
+    if membership is None:
+        membership = Membership(organization_id=organization_id, user_id=user.id)
+        session.add(membership)
+        session.flush()
+        action = "member.added"
+    elif membership.deleted_at is not None:
+        before_membership_restore(session, organization_id, membership.id)
+        membership.deleted_at = None
+        membership.updated_at = datetime.now(UTC)
+        session.flush()
+        action = "member.restored"
+    if action is not None:
+        repo.member_audit(session, organization_id, actor_id, action, membership.id, user.id)
+    for role in roles:
+        assignment = session.get(MembershipRole, (organization_id, membership.id, role.id))
+        if assignment is not None:
+            continue
+        session.add(
+            MembershipRole(
+                organization_id=organization_id,
+                membership_id=membership.id,
+                role_id=role.id,
+            )
+        )
+        permissions = repo.role_permission_grants(session, organization_id, role.id)
+        repo.audit(
+            session,
+            organization_id,
+            actor_id,
+            "assignment.added",
+            role.id,
+            {},
+            permissions,
+            membership.id,
+        )
+    return _member_info(session, membership, user)
+
+
+def add_member(session, *, organization_id, actor_id, user_id, role_ids=()):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, MEMBER_MANAGE, lock=True)
+        user = session.scalar(
+            select(User)
+            .where(User.id == user_id, User.deleted_at.is_(None), User.is_active.is_(True))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if user is None:
+            raise Inaccessible()
+        roles = _initial_roles(session, organization_id, actor_id, role_ids)
+        membership = session.scalar(
+            select(Membership)
+            .where(
+                Membership.organization_id == organization_id,
+                Membership.user_id == user_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return _activate_member(session, organization_id, actor_id, membership, user, roles)
+
+
+def restore_member(session, *, organization_id, actor_id, membership_id, role_ids=()):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, MEMBER_MANAGE, lock=True)
+        row = session.execute(
+            repo.members(organization_id)
+            .where(
+                Membership.id == membership_id,
+                User.is_active.is_(True),
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        roles = _initial_roles(session, organization_id, actor_id, role_ids)
+        return _activate_member(session, organization_id, actor_id, *row, roles)
+
+
+def archive_member(session, *, organization_id, actor_id, membership_id):
+    with transaction(session):
+        organization, _ = authorize(session, organization_id, actor_id, MEMBER_MANAGE, lock=True)
+        row = session.execute(
+            repo.members(organization_id)
+            .where(Membership.id == membership_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        membership, user = row
+        if membership.deleted_at is not None:
+            return
+        before_membership_archive(session, organization, membership, actor_id)
+        membership.deleted_at = datetime.now(UTC)
+        membership.updated_at = datetime.now(UTC)
+        repo.member_audit(
+            session,
+            organization_id,
+            actor_id,
+            "member.archived",
+            membership.id,
+            user.id,
+        )
 
 
 def list_roles(session, *, organization_id, actor_id, limit=50, offset=0):

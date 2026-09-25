@@ -649,7 +649,10 @@ def test_http_security_routes_and_minimal_profiles(identity_session, setup, clie
             == owner.get(foreign).json()
         )
         profiles = owner.get(root + "/members").json()
-        assert all(set(profile) == {"id", "user_id", "display_name"} for profile in profiles)
+        assert all(
+            set(profile) == {"membership_id", "user_id", "display_name", "email", "state", "roles"}
+            for profile in profiles
+        )
         payload = {
             "name": "HTTP Reader",
             "permissions": [{"code": "core.organization.read", "can_grant": False}],
@@ -810,3 +813,359 @@ def test_membership_archive_without_actor_cannot_bypass_role_checks(identity_ses
     with identity_session.begin():
         assert identity_session.get(Membership, setup.owner_member).deleted_at is None
         assert repo.has_administrator(identity_session, setup.org)
+
+
+def test_member_read_contract_requires_permission_and_is_non_disclosing(
+    identity_session, setup, integration_settings
+):
+    env = setup
+    with pytest.raises(AccessError):
+        access.list_members(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.user,
+        )
+    with pytest.raises(AccessError):
+        access.read_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.user,
+            membership_id=env.member,
+        )
+    reader = create(identity_session, env, "Member reader", ["core.members.read"])
+    assign(identity_session, env, reader)
+    detail = access.read_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.user,
+        membership_id=env.member,
+    )
+    assert detail == {
+        "membership_id": env.member,
+        "user_id": env.user,
+        "display_name": "Member",
+        "email": "member@example.test",
+        "state": "active",
+        "roles": [
+            {
+                "id": reader,
+                "name": "Member reader",
+                "permissions": [{"code": "core.members.read", "can_grant": False}],
+            }
+        ],
+    }
+    other = bootstrap(
+        identity_session,
+        settings=integration_settings,
+        email="owner@example.test",
+        slug="member-read-other",
+        name="Other",
+    )
+    with identity_session.begin():
+        foreign_member = identity_session.scalar(
+            select(Membership.id).where(Membership.organization_id == other)
+        )
+    with pytest.raises(Inaccessible):
+        access.read_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            membership_id=foreign_member,
+        )
+
+
+def test_add_duplicate_archive_restore_and_audit(identity_session, setup):
+    env = setup
+    user = identity.create_user(
+        identity_session, email="employee@example.test", display_name="Employee"
+    )
+    role = create(identity_session, env, "Employee reader", ["core.organization.read"])
+    added = access.add_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        user_id=user,
+        role_ids=[role],
+    )
+    membership_id = added["membership_id"]
+    assert added["state"] == "active"
+    assert [item["id"] for item in added["roles"]] == [role]
+    duplicate = access.add_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        user_id=user,
+        role_ids=[role],
+    )
+    assert duplicate == added
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(func.count())
+                .select_from(Membership)
+                .where(Membership.organization_id == env.org, Membership.user_id == user)
+            )
+            == 1
+        )
+        assert (
+            identity_session.scalar(
+                select(func.count())
+                .select_from(RoleAudit)
+                .where(
+                    RoleAudit.membership_id == membership_id,
+                    RoleAudit.action == "member.added",
+                )
+            )
+            == 1
+        )
+    access.archive_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=membership_id,
+    )
+    archived = access.read_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=membership_id,
+    )
+    assert archived["state"] == "archived" and archived["roles"] == []
+    restored = access.restore_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=membership_id,
+    )
+    assert restored["membership_id"] == membership_id
+    assert restored["state"] == "active" and restored["roles"] == []
+    with identity_session.begin():
+        events = list(
+            identity_session.scalars(
+                select(RoleAudit.action).where(RoleAudit.membership_id == membership_id)
+            )
+        )
+        assert sorted(events) == sorted(
+            [
+                "member.added",
+                "assignment.added",
+                "assignment.removed",
+                "member.archived",
+                "member.restored",
+            ]
+        )
+        assert identity_session.get(User, user).is_active is True
+
+
+def test_member_manage_permission_and_initial_role_grant_ceiling(identity_session, setup):
+    env = setup
+    manager_user = identity.create_user(
+        identity_session, email="manager@example.test", display_name="Manager"
+    )
+    manager_member = identity.add_membership(
+        identity_session, organization_id=env.org, user_id=manager_user
+    )
+    manager_role = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Member manager",
+        permissions={"core.members.manage": False, "core.roles.assign": False},
+    )["id"]
+    assign(identity_session, env, manager_role, manager_member)
+    target = identity.create_user(
+        identity_session, email="managed@example.test", display_name="Managed"
+    )
+    with pytest.raises(AccessError):
+        access.add_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.user,
+            user_id=target,
+        )
+    weak = create(identity_session, env, "Weak role", ["core.organization.read"])
+    with pytest.raises(AccessError):
+        access.add_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=manager_user,
+            user_id=target,
+            role_ids=[weak],
+        )
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(Membership.id).where(
+                    Membership.organization_id == env.org, Membership.user_id == target
+                )
+            )
+            is None
+        )
+    result = access.add_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=manager_user,
+        user_id=target,
+    )
+    assert result["roles"] == []
+
+
+def test_initial_roles_reject_foreign_role_and_roll_back_restore(
+    identity_session, setup, integration_settings
+):
+    env = setup
+    target = identity.create_user(
+        identity_session, email="atomic@example.test", display_name="Atomic"
+    )
+    other = bootstrap(
+        identity_session,
+        settings=integration_settings,
+        email="owner@example.test",
+        slug="atomic-other",
+        name="Atomic other",
+    )
+    with identity_session.begin():
+        foreign_role = identity_session.scalar(select(Role.id).where(Role.organization_id == other))
+    with pytest.raises(Inaccessible):
+        access.add_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            user_id=target,
+            role_ids=[foreign_role],
+        )
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(Membership.id).where(
+                    Membership.organization_id == env.org, Membership.user_id == target
+                )
+            )
+            is None
+        )
+    membership = access.add_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        user_id=target,
+    )["membership_id"]
+    access.archive_member(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=membership,
+    )
+    with pytest.raises(Inaccessible):
+        access.restore_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            membership_id=membership,
+            role_ids=[foreign_role],
+        )
+    with identity_session.begin():
+        assert identity_session.get(Membership, membership).deleted_at is not None
+
+
+def test_archive_immediately_revokes_only_one_organization(
+    identity_session, setup, clients, integration_settings
+):
+    env = setup
+    access.change_assignment(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=env.member,
+        role_id=create(identity_session, env, "Organization reader", ["core.organization.read"]),
+    )
+    other = bootstrap(
+        identity_session,
+        settings=integration_settings,
+        email="member@example.test",
+        slug="shared-user-other",
+        name="Shared user other",
+    )
+    with clients("member@example.test") as client:
+        assert client.get(f"/organizations/{env.org}").status_code == 200
+        assert client.get(f"/organizations/{other}").status_code == 200
+        access.archive_member(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            membership_id=env.member,
+        )
+        assert client.get(f"/organizations/{env.org}").status_code == 404
+        assert client.get(f"/organizations/{other}").status_code == 200
+    with identity_session.begin():
+        assert identity_session.get(User, env.user).is_active is True
+
+
+def test_last_administrator_membership_cannot_be_archived(identity_session, setup):
+    with pytest.raises(LastAdministrator):
+        access.archive_member(
+            identity_session,
+            organization_id=setup.org,
+            actor_id=setup.owner,
+            membership_id=setup.owner_member,
+        )
+    with identity_session.begin():
+        assert identity_session.get(Membership, setup.owner_member).deleted_at is None
+        assert repo.has_administrator(identity_session, setup.org)
+
+
+def test_member_http_lifecycle_statuses_and_global_update_boundary(
+    identity_session, setup, clients
+):
+    env = setup
+    target = identity.create_user(
+        identity_session, email="http-employee@example.test", display_name="HTTP Employee"
+    )
+    root = f"/organizations/{env.org}/members"
+    with clients() as owner:
+        add = owner.post(root, json={"user_id": str(target)}, headers={"Origin": ORIGIN})
+        assert add.status_code == 200
+        membership = add.json()["membership_id"]
+        assert owner.get(f"{root}/{membership}").status_code == 200
+        assert (
+            owner.post(
+                root,
+                json={"user_id": str(target), "is_active": False},
+                headers={"Origin": ORIGIN},
+            ).status_code
+            == 422
+        )
+        assert owner.delete(f"{root}/{membership}", headers={"Origin": ORIGIN}).status_code == 204
+        assert owner.get(f"{root}/{membership}").json()["state"] == "archived"
+        restore = owner.post(f"{root}/{membership}/restore", json={}, headers={"Origin": ORIGIN})
+        assert restore.status_code == 200
+        assert restore.json()["membership_id"] == membership
+    with identity_session.begin():
+        assert identity_session.get(User, target).is_active is True
+
+
+def test_member_audit_failure_rolls_back_membership(identity_session, setup):
+    target = identity.create_user(
+        identity_session, email="audit-rollback@example.test", display_name="Audit rollback"
+    )
+    original = repo.member_audit
+
+    def fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise IntegrityError("hidden", {}, Exception("hidden"))
+
+    with patch.object(repo, "member_audit", side_effect=fail), pytest.raises(StorageUnavailable):
+        access.add_member(
+            identity_session,
+            organization_id=setup.org,
+            actor_id=setup.owner,
+            user_id=target,
+        )
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(Membership.id).where(
+                    Membership.organization_id == setup.org, Membership.user_id == target
+                )
+            )
+            is None
+        )

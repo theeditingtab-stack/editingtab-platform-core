@@ -44,6 +44,29 @@ class RoleInput(BaseModel):
         return self
 
 
+class MemberInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: UUID
+    role_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_roles(self):
+        if len(self.role_ids) != len(set(self.role_ids)):
+            raise ValueError("duplicate role id")
+        return self
+
+
+class MemberRestoreInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def unique_roles(self):
+        if len(self.role_ids) != len(set(self.role_ids)):
+            raise ValueError("duplicate role id")
+        return self
+
+
 @router.get("")
 def organizations(session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0):
     return services.list_organizations(session, actor_id=actor_id, limit=limit, offset=offset)
@@ -60,6 +83,55 @@ def members(
 ):
     return services.list_members(
         session, organization_id=organization_id, actor_id=actor_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/{organization_id}/members/{membership_id}")
+def member(organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor):
+    return services.read_member(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+    )
+
+
+@router.post("/{organization_id}/members")
+def add_member(organization_id: UUID, body: MemberInput, session: Database, actor_id: Actor):
+    return services.add_member(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        user_id=body.user_id,
+        role_ids=body.role_ids,
+    )
+
+
+@router.delete("/{organization_id}/members/{membership_id}", status_code=204)
+def archive_member(organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor):
+    services.archive_member(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+    )
+    return Response(status_code=204)
+
+
+@router.post("/{organization_id}/members/{membership_id}/restore")
+def restore_member(
+    organization_id: UUID,
+    membership_id: UUID,
+    body: MemberRestoreInput,
+    session: Database,
+    actor_id: Actor,
+):
+    return services.restore_member(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+        role_ids=body.role_ids,
     )
 
 
