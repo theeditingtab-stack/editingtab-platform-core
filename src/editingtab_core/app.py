@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
-from editingtab_core.auth.http import AuthRequestGuard, router
+from editingtab_core.auth.http import AuthRequestGuard, invitation_router, router
 from editingtab_core.auth.security import (
     AuthenticationError,
     AuthenticationUnavailable,
@@ -51,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.add_middleware(AuthRequestGuard, origins=settings.auth_allowed_origins)
     app.include_router(router)
+    app.include_router(invitation_router)
     app.include_router(organization_router)
     app.include_router(platform_router)
     app.include_router(tenant_router)

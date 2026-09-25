@@ -1,4 +1,4 @@
-> Historical CORE-004 handoff. CORE-005 now adds [organization roles and enforced permissions](core-005-authorization.md); authentication remains unchanged. Public organization routes require current membership/permissions, and the Origin guard also covers `/organizations`.
+> Historical CORE-004 handoff. CORE-005 added [organization roles and enforced permissions](core-005-authorization.md). CORE-AUTH-004 now adds [production account onboarding and session lifecycle](core-auth-004-account-onboarding.md). Public organization routes require current membership/permissions, and the Origin guard also covers `/organizations`.
 
 # CORE-004: Password authentication and revocable sessions
 
