@@ -28,6 +28,19 @@ def active_members(organization_id):
     )
 
 
+def members(organization_id):
+    return (
+        select(Membership, User)
+        .join(User, User.id == Membership.user_id)
+        .join(Organization, Organization.id == Membership.organization_id)
+        .where(
+            Membership.organization_id == organization_id,
+            Organization.deleted_at.is_(None),
+            User.deleted_at.is_(None),
+        )
+    )
+
+
 def permission_query(organization_id):
     return (
         select(RolePermission.code)
@@ -141,6 +154,27 @@ def role_permission_grants(session, organization_id, role_id):
     }
 
 
+def membership_roles(session, organization_id, membership_id):
+    return list(
+        session.scalars(
+            select(Role)
+            .join(
+                MembershipRole,
+                and_(
+                    MembershipRole.role_id == Role.id,
+                    MembershipRole.organization_id == Role.organization_id,
+                ),
+            )
+            .where(
+                MembershipRole.organization_id == organization_id,
+                MembershipRole.membership_id == membership_id,
+                Role.deleted_at.is_(None),
+            )
+            .order_by(Role.name, Role.id)
+        )
+    )
+
+
 def replace_permissions(session, organization_id, role_id, permissions):
     session.execute(
         delete(RolePermission).where(
@@ -178,3 +212,10 @@ def audit(session, organization_id, actor_id, action, role_id, before, after, me
         )
     )
     session.flush()
+
+
+def member_audit(session, organization_id, actor_id, action, membership_id, user_id):
+    # RoleAudit is the existing organization authorization audit ledger. For member
+    # lifecycle events target_id identifies the global user and membership_id the
+    # organization relationship; no account-security data is recorded.
+    audit(session, organization_id, actor_id, action, user_id, {}, {}, membership_id)

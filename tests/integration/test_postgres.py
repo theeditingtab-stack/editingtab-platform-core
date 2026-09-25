@@ -134,7 +134,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
         "core.roles.archive",
         "core.roles.assign",
     }
-    migrated_codes = preserved_codes | granular_operations
+    migrated_codes = preserved_codes | granular_operations | {"core.members.manage"}
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         assert session.get(Role, role_id).organization_id == owned_id
         assert (
@@ -180,7 +180,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0008_delegated_grant_authority"
+    assert expected_head == "0009_employee_lifecycle"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -222,7 +222,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0008_delegated_grant_authority"
+        == "0009_employee_lifecycle"
     )
 
 
