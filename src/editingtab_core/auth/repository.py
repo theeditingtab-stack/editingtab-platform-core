@@ -17,7 +17,8 @@ from editingtab_core.auth.models import (
     PasswordResetToken,
     SecurityAudit,
 )
-from editingtab_core.identity.models import User
+from editingtab_core.identity.models import Membership, Organization, User
+from editingtab_core.platform.models import ModuleEntitlement, PlatformAdminGrant
 
 
 def credential_for_login(session: Session, normalized_email: str):
@@ -61,6 +62,49 @@ def authenticated_session(session: Session, digest: str, *, lock: bool = False):
     if lock:
         query = query.with_for_update()
     return session.execute(query).one_or_none()
+
+
+def active_organization_memberships(session: Session, user_id: UUID):
+    """Return only current tenant relationships, ordered by stable public slug."""
+    return list(
+        session.execute(
+            select(Membership, Organization)
+            .join(Organization, Organization.id == Membership.organization_id)
+            .where(
+                Membership.user_id == user_id,
+                Membership.deleted_at.is_(None),
+                Organization.deleted_at.is_(None),
+            )
+            .order_by(Organization.slug, Organization.id)
+            .execution_options(populate_existing=True)
+        )
+    )
+
+
+def enabled_modules(session: Session, organization_id: UUID, supported_modules):
+    return list(
+        session.scalars(
+            select(ModuleEntitlement.module_code)
+            .where(
+                ModuleEntitlement.organization_id == organization_id,
+                ModuleEntitlement.enabled.is_(True),
+                ModuleEntitlement.module_code.in_(supported_modules),
+            )
+            .order_by(ModuleEntitlement.module_code)
+        )
+    )
+
+
+def has_platform_admin_grant(session: Session, user_id: UUID) -> bool:
+    return (
+        session.scalar(
+            select(PlatformAdminGrant.id).where(
+                PlatformAdminGrant.user_id == user_id,
+                PlatformAdminGrant.revoked_at.is_(None),
+            )
+        )
+        is not None
+    )
 
 
 def add_session(session: Session, *, user_id: UUID, digest: str, seconds: int):

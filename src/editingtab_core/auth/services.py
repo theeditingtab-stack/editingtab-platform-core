@@ -26,12 +26,14 @@ from editingtab_core.auth.security import (
     token_digest,
     validate_password,
 )
+from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization import services as authorization_services
 from editingtab_core.authorization.policy import MEMBER_MANAGE, AccessError, Conflict
 from editingtab_core.config import Settings
 from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.models import Membership, User
 from editingtab_core.identity.normalization import clean_name, normalize_email
+from editingtab_core.platform.services import SUPPORTED_MODULES
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,52 @@ def current_user(session: Session, token: str | None) -> Profile:
             raise AuthenticationError("Authentication required.")
         profile = Profile(user.id, user.email, user.display_name)
     return profile
+
+
+def access_context(session: Session, token: str | None):
+    """Build current authorization context from database state, never session claims."""
+    with transaction(session):
+        user, _ = _session_identity(session, token)
+        organizations = []
+        for membership, organization in repository.active_organization_memberships(
+            session, user.id
+        ):
+            organizations.append(
+                {
+                    "organization_id": organization.id,
+                    "name": organization.name,
+                    "slug": organization.slug,
+                    "membership_id": membership.id,
+                    "roles": [
+                        {"role_id": role.id, "role_name": role.name}
+                        for role in authorization_repository.membership_roles(
+                            session, organization.id, membership.id
+                        )
+                    ],
+                    "effective_permissions": sorted(
+                        authorization_repository.effective_permissions(
+                            session, organization.id, user.id
+                        )
+                    ),
+                    "effective_grant_authority": sorted(
+                        authorization_repository.effective_grant_authority(
+                            session, organization.id, user.id
+                        )
+                    ),
+                    "enabled_modules": repository.enabled_modules(
+                        session, organization.id, SUPPORTED_MODULES
+                    ),
+                }
+            )
+        return {
+            "user": {
+                "user_id": user.id,
+                "email": user.email,
+                "display_name": user.display_name,
+            },
+            "is_platform_admin": repository.has_platform_admin_grant(session, user.id),
+            "organizations": organizations,
+        }
 
 
 def logout(session: Session, token: str | None) -> None:

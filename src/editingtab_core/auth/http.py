@@ -24,6 +24,38 @@ class LoginInput(BaseModel):
     password: SecretStr = Field(repr=False, exclude=True)
 
 
+class ContextUser(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: UUID
+    email: str
+    display_name: str
+
+
+class ContextRole(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role_id: UUID
+    role_name: str
+
+
+class ContextOrganization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    organization_id: UUID
+    name: str
+    slug: str
+    membership_id: UUID
+    roles: list[ContextRole]
+    effective_permissions: list[str]
+    effective_grant_authority: list[str]
+    enabled_modules: list[str]
+
+
+class AccessContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user: ContextUser
+    is_platform_admin: bool
+    organizations: list[ContextOrganization]
+
+
 @router.post("/login", status_code=204)
 def login(body: LoginInput, request: Request, session: Annotated[Session, Depends(get_session)]):
     settings = request.app.state.settings
@@ -51,6 +83,11 @@ def login(body: LoginInput, request: Request, session: Annotated[Session, Depend
 @router.get("/me")
 def me(request: Request, session: Annotated[Session, Depends(get_session)]) -> services.Profile:
     return services.current_user(session, request.cookies.get(COOKIE_NAME))
+
+
+@router.get("/context", response_model=AccessContext)
+def context(request: Request, session: Annotated[Session, Depends(get_session)]):
+    return services.access_context(session, request.cookies.get(COOKIE_NAME))
 
 
 @router.post("/logout", status_code=204)
