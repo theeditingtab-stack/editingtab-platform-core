@@ -66,7 +66,7 @@ roles, permissions, memberships, or organization visibility. A platform administ
 explicit active membership receives an empty organization list and must use separately authorized
 platform APIs for platform work.
 
-## Future Booking handoff
+## Booking authorization handoff
 
 The intended runtime flow remains:
 
@@ -80,8 +80,9 @@ The intended runtime flow remains:
    Booking entitlement for that operation.
 
 Booking must not trust role names, effective-permission lists, grant-authority lists, module lists,
-or an organization ID sent by the frontend. It must not read Core tables. CORE-AUTH-005 changes no
-Booking application or internal authorization contract.
+or an organization ID sent by the frontend. It must not read Core tables. CORE-AUTH-006 implements
+this authoritative Core-side decision at `POST /internal/v1/booking/authorize`; Booking repository
+integration remains a later checkpoint.
 
 ## Scope and persistence
 
