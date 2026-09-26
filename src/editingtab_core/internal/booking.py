@@ -19,7 +19,7 @@ from editingtab_core.authorization.policy import (
     Inaccessible,
     StorageUnavailable,
 )
-from editingtab_core.authorization.services import authorize, transaction
+from editingtab_core.authorization.services import authorization_context, transaction
 from editingtab_core.platform.services import require_entitlement
 
 PATH = "/internal/v1/booking/authorize"
@@ -144,7 +144,9 @@ def authorize_booking(session, *, token, organization_id, permission):
             if user is None:
                 raise AuthorizationFailure(401, "invalid_user_session")
             try:
-                authorize(session, organization_id, user.id, permission)
+                _, membership, _ = authorization_context(
+                    session, organization_id, user.id, permission
+                )
             except Inaccessible:
                 raise AuthorizationFailure(404, "organization_not_accessible") from None
             except AccessError:
@@ -156,8 +158,9 @@ def authorize_booking(session, *, token, organization_id, permission):
             except AccessError:
                 raise AuthorizationFailure(403, "module_disabled") from None
             return {
-                "authorized": True,
+                "allowed": True,
                 "user_id": user.id,
+                "membership_id": membership.id,
                 "organization_id": organization_id,
                 "permission": permission,
             }

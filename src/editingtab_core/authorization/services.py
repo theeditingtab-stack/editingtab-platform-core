@@ -46,6 +46,14 @@ def transaction(session):
 
 
 def authorize(session, organization_id, actor_id, code, *, lock=False):
+    organization, _, held = authorization_context(
+        session, organization_id, actor_id, code, lock=lock
+    )
+    return organization, held
+
+
+def authorization_context(session, organization_id, actor_id, code, *, lock=False):
+    """Return the current active tenant relationship for one exact permission."""
     if repo.assignable_permission_codes(session, [code]) != {code}:
         raise InvalidPermission()
     query = select(Organization).where(
@@ -54,16 +62,15 @@ def authorize(session, organization_id, actor_id, code, *, lock=False):
     if lock:
         query = query.with_for_update()
     organization = session.scalar(query.execution_options(populate_existing=True))
-    if (
-        organization is None
-        or session.execute(repo.active_members(organization_id).where(User.id == actor_id)).first()
-        is None
-    ):
+    member = session.execute(
+        repo.active_members(organization_id).where(User.id == actor_id)
+    ).first()
+    if organization is None or member is None:
         raise Inaccessible()
     held = repo.effective_permissions(session, organization_id, actor_id)
     if code not in held:
         raise AccessError()
-    return organization, held
+    return organization, member[0], held
 
 
 def _role(session, organization_id, role_id, *, archived=False):

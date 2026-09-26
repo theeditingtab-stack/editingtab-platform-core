@@ -20,7 +20,6 @@ from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization import services as access
 from editingtab_core.authorization.models import MembershipRole, Role, RoleAudit, RolePermission
 from editingtab_core.authorization.policy import (
-    BOOKING_INVENTORY_PERMISSIONS,
     BOOKING_PERMISSIONS,
     AccessError,
     Conflict,
@@ -31,7 +30,7 @@ from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Membership, Organization, User
 from editingtab_core.internal.booking import PATH
 from editingtab_core.platform import services as platform
-from editingtab_core.platform.booking_permissions import ROLE_NAME, provision
+from editingtab_core.platform.booking_permissions import LEGACY_ROLE_NAME, ROLE_NAME, provision
 from editingtab_core.platform.models import PlatformAudit
 
 pytestmark = pytest.mark.integration
@@ -84,7 +83,12 @@ def env(identity_session, integration_settings):
         for name in ids
     }
     return SimpleNamespace(
-        **ids, org=org, member=member, ordinary_member=ordinary_member, tokens=tokens
+        **ids,
+        org=org,
+        member=member,
+        ordinary_member=ordinary_member,
+        tokens=tokens,
+        passwords=passwords,
     )
 
 
@@ -176,8 +180,9 @@ def test_success_minimal_response_both_rotation_slots(identity_session, env, cli
         response = request(client, env, service=service)
         assert response.status_code == 200
         assert response.json() == {
-            "authorized": True,
+            "allowed": True,
             "user_id": str(env.owner),
+            "membership_id": str(env.member),
             "organization_id": str(env.org),
             "permission": READ,
         }
@@ -279,20 +284,17 @@ def test_permission_entitlement_and_revocation_without_relogin(identity_session,
         error(request(client, env), 401, "invalid_user_session")
 
 
-@pytest.mark.parametrize("permission", sorted(BOOKING_PERMISSIONS - {READ}))
-def test_final_booking_permission_vocabulary_is_recognized(
-    identity_session, env, clients, permission
-):
+@pytest.mark.parametrize("permission", sorted(BOOKING_PERMISSIONS))
+def test_every_booking_permission_can_be_authorized(identity_session, env, clients, permission):
+    grant(identity_session, env)
     with clients() as client:
-        error(
-            request(
-                client,
-                env,
-                body={"organization_id": str(env.org), "permission": permission},
-            ),
-            403,
-            "permission_denied",
+        response = request(
+            client,
+            env,
+            body={"organization_id": str(env.org), "permission": permission},
         )
+        assert response.status_code == 200
+        assert response.json()["permission"] == permission
 
 
 @pytest.mark.parametrize(
@@ -336,9 +338,7 @@ def test_provisioning_idempotent_audit_and_no_tenant_delegation(identity_session
         )
         assert audit.actor_id == env.operator and audit.target_id == env.member
         assert audit.before == {"assigned": False, "permissions": []}
-        assert {item["code"] for item in audit.after["permissions"]} == (
-            BOOKING_INVENTORY_PERMISSIONS
-        )
+        assert {item["code"] for item in audit.after["permissions"]} == (BOOKING_PERMISSIONS)
         assert all(not item["can_grant"] for item in audit.after["permissions"])
         count = identity_session.scalar(select(func.count()).select_from(RoleAudit))
     assert grant(identity_session, env) == result
@@ -489,9 +489,7 @@ def test_explicit_reprovision_can_restore_only_designated_booking_permissions(
         repo.replace_permissions(identity_session, env.org, role, {READ: False})
     grant(identity_session, env)
     with identity_session.begin():
-        assert (
-            repo.role_permissions(identity_session, env.org, role) == BOOKING_INVENTORY_PERMISSIONS
-        )
+        assert repo.role_permissions(identity_session, env.org, role) == BOOKING_PERMISSIONS
         audits = identity_session.scalars(
             select(PlatformAudit).where(PlatformAudit.action == "booking.permissions.provisioned")
         ).all()
@@ -504,3 +502,209 @@ def test_explicit_reprovision_can_restore_only_designated_booking_permissions(
             }
             for row in audits
         )
+
+
+def test_provisioning_preserves_custom_roles_and_adds_no_core_permissions(identity_session, env):
+    with identity_session.begin():
+        custom = Role(
+            organization_id=env.org,
+            name="Custom Booking reader",
+            normalized_name="custom booking reader",
+        )
+        identity_session.add(custom)
+        identity_session.flush()
+        repo.replace_permissions(
+            identity_session,
+            env.org,
+            custom.id,
+            {"booking.reservations.read": False, "core.organization.read": False},
+        )
+        before = repo.role_permission_grants(identity_session, env.org, custom.id)
+    result = grant(identity_session, env)
+    with identity_session.begin():
+        assert repo.role_permission_grants(identity_session, env.org, custom.id) == before
+        provisioned = repo.role_permission_grants(identity_session, env.org, result["role_id"])
+        assert set(provisioned) == BOOKING_PERMISSIONS
+        assert not any(provisioned.values())
+        assert not any(code.startswith("core.") for code in provisioned)
+
+
+def test_explicit_reprovision_evolves_legacy_dedicated_role(identity_session, env):
+    with identity_session.begin():
+        legacy = Role(
+            organization_id=env.org,
+            name=LEGACY_ROLE_NAME,
+            normalized_name=LEGACY_ROLE_NAME.lower(),
+            provisioning_kind="booking_inventory",
+        )
+        identity_session.add(legacy)
+        identity_session.flush()
+        repo.replace_permissions(identity_session, env.org, legacy.id, {READ: False})
+    result = grant(identity_session, env)
+    with identity_session.begin():
+        evolved = identity_session.get(Role, result["role_id"])
+        assert evolved.id == legacy.id
+        assert evolved.name == ROLE_NAME
+        assert repo.role_permissions(identity_session, env.org, evolved.id) == BOOKING_PERMISSIONS
+        audit = identity_session.scalar(
+            select(PlatformAudit).where(PlatformAudit.action == "booking.permissions.provisioned")
+        )
+        assert audit.before["role_name"] == LEGACY_ROLE_NAME
+        assert audit.after["role_name"] == ROLE_NAME
+
+
+def test_same_user_multi_org_authorization_is_independent(identity_session, env, clients):
+    other = platform.onboard(
+        identity_session,
+        actor_id=env.operator,
+        name="Second client",
+        slug="second-client",
+        owner_email="owner@example.test",
+        enabled_modules=["booking"],
+    )["id"]
+    with identity_session.begin():
+        other_member = identity_session.scalar(
+            select(Membership.id).where(
+                Membership.organization_id == other, Membership.user_id == env.owner
+            )
+        )
+    grant(identity_session, env)
+    with clients() as client:
+        assert request(client, env).status_code == 200
+        error(
+            request(
+                client,
+                env,
+                body={"organization_id": str(other), "permission": READ},
+            ),
+            403,
+            "permission_denied",
+        )
+        provision(
+            identity_session,
+            actor_id=env.operator,
+            organization_id=other,
+            membership_id=other_member,
+        )
+        response = request(
+            client,
+            env,
+            body={"organization_id": str(other), "permission": READ},
+        )
+        assert response.status_code == 200
+        assert response.json()["membership_id"] == str(other_member)
+
+
+def test_entitlement_from_another_organization_never_applies(identity_session, env, clients):
+    other = platform.onboard(
+        identity_session,
+        actor_id=env.operator,
+        name="No Booking entitlement",
+        slug="no-booking-entitlement",
+        owner_email="owner@example.test",
+        enabled_modules=[],
+    )["id"]
+    with identity_session.begin():
+        other_member = identity_session.scalar(
+            select(Membership.id).where(
+                Membership.organization_id == other, Membership.user_id == env.owner
+            )
+        )
+        role = Role(
+            organization_id=other,
+            name="Existing Booking reader",
+            normalized_name="existing booking reader",
+        )
+        identity_session.add(role)
+        identity_session.flush()
+        identity_session.add_all(
+            (
+                RolePermission(
+                    organization_id=other,
+                    role_id=role.id,
+                    code=READ,
+                    can_grant=False,
+                ),
+                MembershipRole(
+                    organization_id=other,
+                    membership_id=other_member,
+                    role_id=role.id,
+                ),
+            )
+        )
+    with clients() as client:
+        error(
+            request(
+                client,
+                env,
+                body={"organization_id": str(other), "permission": READ},
+            ),
+            403,
+            "module_disabled",
+        )
+
+
+def test_selected_revocation_and_password_reset_invalidate_authorization(
+    identity_session, env, clients, integration_settings
+):
+    grant(identity_session, env)
+    token = env.tokens["owner"]
+    with identity_session.begin():
+        session_id = identity_session.scalar(
+            select(LoginSession.id).where(LoginSession.token_digest == token_digest(token))
+        )
+    assert auth.revoke_selected_session(identity_session, token, session_id) is True
+    with clients() as client:
+        error(request(client, env, token=token), 401, "invalid_user_session")
+
+    fresh = auth.login(
+        identity_session,
+        settings=integration_settings,
+        passwords=env.passwords,
+        email="owner@example.test",
+        password=PASSWORD,
+        source="127.0.0.2",
+    )
+    reset = auth.request_password_reset(
+        identity_session,
+        settings=integration_settings,
+        email="owner@example.test",
+        source="booking-reset-test",
+    )
+    assert reset is not None
+    auth.reset_password(
+        identity_session,
+        passwords=env.passwords,
+        token=reset,
+        password="new synthetic booking authorization password",
+    )
+    with clients() as client:
+        error(request(client, env, token=fresh), 401, "invalid_user_session")
+
+
+def test_access_context_and_authoritative_decision_share_current_state(
+    identity_session, env, clients
+):
+    grant(identity_session, env)
+    context = auth.access_context(identity_session, env.tokens["owner"])
+    organization = next(
+        item for item in context["organizations"] if item["organization_id"] == env.org
+    )
+    assert READ in organization["effective_permissions"]
+    assert "booking" in organization["enabled_modules"]
+    with clients() as client:
+        assert request(client, env).status_code == 200
+        platform.set_entitlement(
+            identity_session,
+            actor_id=env.operator,
+            organization_id=env.org,
+            module_code="booking",
+            enabled=False,
+        )
+        context = auth.access_context(identity_session, env.tokens["owner"])
+        organization = next(
+            item for item in context["organizations"] if item["organization_id"] == env.org
+        )
+        assert READ in organization["effective_permissions"]
+        assert "booking" not in organization["enabled_modules"]
+        error(request(client, env), 403, "module_disabled")

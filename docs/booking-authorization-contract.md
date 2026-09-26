@@ -1,239 +1,171 @@
 # Core / Booking authorization contract (v1)
 
-CORE-007 implements only Core's side. Booking's inspected integration document described a proposed connection; its repository was not modified. Core and Booking are separate applications with separate databases. Booking must never connect to Core's database or infer authority from stored external UUIDs.
+CORE-AUTH-006 defines Core's authoritative decision for protected Booking operations. It changes
+only the Core repository. Booking remains a separate application with its own database and must
+not read Core tables or infer authority from an organization UUID.
 
-## Exact request and response
+## Permission vocabulary
 
-`POST /internal/v1/booking/authorize`, `Content-Type: application/json`
+The endpoint accepts one exact active Booking permission from this closed vocabulary:
 
-Required headers (values below are placeholders, not credentials):
+- `booking.inventory.read`
+- `booking.inventory.manage`
+- `booking.reservations.read`
+- `booking.reservations.create`
+- `booking.reservations.update`
+- `booking.reservations.cancel`
+- `booking.availability.read`
+- `booking.safari.read`
+- `booking.safari.manage`
+- `booking.settings.read`
+- `booking.settings.manage`
+
+There are no wildcard, POS, Inbox, or Chatbot permissions. Malformed codes, unknown codes, and
+non-Booking codes all fail as invalid authorization requests.
+
+## Request and positive response
+
+`POST /internal/v1/booking/authorize`, with `Content-Type: application/json`:
 
 ```text
 Authorization: Bearer <Booking service secret>
-X-Core-Session: <existing opaque Core user session token>
+X-Core-Session: <opaque Core user session token>
 ```
 
 ```json
-{"organization_id":"<UUID>","permission":"booking.inventory.read"}
+{"organization_id":"<UUID>","permission":"booking.reservations.create"}
 ```
 
-The endpoint accepts only the reviewed Booking permissions registered by CORE-AUTH-001: inventory read/manage; reservation read/create/update/cancel; availability read; safari read/manage; and settings read/manage. Exact codes are listed in the [permission registry](core-auth-001-permission-registry.md). No actor/user ID, additional fields, or other module/Core permissions are accepted. The body is bounded to 4096 bytes. Duplicate credential headers are rejected. Browser cookies never authenticate this endpoint. Origin is not required on this exact service-authenticated route; all existing browser mutation Origin checks remain unchanged.
+The service credential authenticates Booking, while the Core session proves the user identity.
+The organization and exact permission select the tenant relationship and operation to evaluate;
+neither is authority by itself. Browser cookies do not authenticate this internal endpoint, and
+the service credential must never be sent to or accepted from the browser.
 
-Success is HTTP 200 with exactly:
+HTTP 200 contains exactly the identifiers Core verified:
 
 ```json
-{"authorized":true,"user_id":"<verified UUID>","organization_id":"<verified UUID>","permission":"booking.inventory.read"}
+{
+  "allowed": true,
+  "user_id": "<UUID>",
+  "membership_id": "<UUID>",
+  "organization_id": "<UUID>",
+  "permission": "booking.reservations.create"
+}
 ```
 
-Every response from this endpoint has `Cache-Control: no-store`. Errors have only `{"error":"<code>"}`:
+It does not contain roles, the broader permission set, grant authority, platform grants,
+entitlement lists, credentials, session data, or secrets. Every response carries
+`Cache-Control: no-store`.
 
-| HTTP | Code | Meaning |
+## Authoritative decision flow
+
+Core evaluates each call from current database state and allows it only when all of these remain
+true:
+
+1. the Booking service credential and transport are valid;
+2. the Core session exists, is unexpired, and is not revoked;
+3. the session user is active and not archived;
+4. the requested organization and the user's membership are active;
+5. an active assigned organization role currently supplies the exact requested permission; and
+6. that same organization's Booking entitlement is enabled.
+
+The decision uses no role names, frontend lists, session permission claims, wildcard expansion,
+or platform-admin bypass. Logout, selected-session revocation, password reset, user deactivation,
+membership/organization/role archival, assignment or permission removal, and entitlement disable
+affect the next request. The response is a point-in-time decision; Booking must still scope its own
+database operation to the verified organization and must not cache or reuse the result.
+
+## Error contract
+
+Errors contain only `{"error":"<code>"}`. The deliberately grouped cases avoid disclosing
+tenant existence or credential detail.
+
+| HTTP | Code | Cases |
 | --- | --- | --- |
-| 401 | `invalid_service_credentials` | Missing/invalid service credential, disabled integration, or unacceptable transport |
-| 401 | `invalid_user_session` | Missing/malformed/expired/revoked session, inactive or archived user |
-| 404 | `organization_not_accessible` | Missing/archived organization, absent/archived membership, or another organization's identifier |
-| 403 | `permission_denied` | Active member does not hold the requested Booking permission |
-| 403 | `module_disabled` | Booking entitlement is not enabled |
-| 422 | `invalid_authorization_request` | Invalid JSON/body, extra fields, invalid UUID, unsupported permission, oversized body, or wrong method |
-| 503 | `authorization_unavailable` | Core could not safely complete database authorization |
+| 401 | `invalid_service_credentials` | Missing/bad service credential, integration disabled, duplicate credential header, or unacceptable transport |
+| 401 | `invalid_user_session` | Missing/malformed/expired/revoked session, archived user, or inactive user |
+| 422 | `invalid_authorization_request` | Invalid JSON/body/UUID, extra field, malformed/non-Booking/unknown permission, wrong method, or body over 4096 bytes |
+| 404 | `organization_not_accessible` | Missing/archived organization, missing/archived membership, or foreign organization |
+| 403 | `permission_denied` | Active member lacks the exact effective permission |
+| 403 | `module_disabled` | Exact permission is present but the organization's Booking entitlement is disabled or absent |
+| 503 | `authorization_unavailable` | Core cannot safely complete the database decision |
 
-Transport and Booking service authentication run before parsing the body or inspecting user/tenant data. Session-header syntax and request validation follow, then current database session/user state, active membership/organization, permission union, and Booking entitlement. Platform grants alone never bypass tenant membership or permission checks. No passwords, profile data, tokens, or broad permission sets are returned. Do not log request bodies or either credential header. Validation responses never include supplied values.
+Service authentication happens before body parsing or user/tenant database access. Session-header
+syntax is checked before the request body reaches the route. Core does not echo supplied values or
+log credential contents through this contract. Booking must fail closed for every non-200 result,
+timeout, TLS/network failure, malformed response, redirect, or identifier mismatch.
 
-There is no positive authorization cache. Every request rechecks database state; logout, session expiry, role/assignment revocation, archival, and disabled entitlements affect the next request. This is a point-in-time decision, not a cross-database transaction or lock on subsequent Booking work.
+## Service credential boundary
 
-## Service credential and transport
+Core stores only SHA-256 digests in private deployment settings:
 
-Core accepts SHA-256 digests through these optional private deployment settings:
+- `CORE_BOOKING_SERVICE_CURRENT_DIGEST` is required; without it the integration is disabled.
+- `CORE_BOOKING_SERVICE_PREVIOUS_DIGEST` optionally supports a bounded credential-rotation
+  overlap and cannot enable access without a current credential configuration.
 
-- `CORE_BOOKING_SERVICE_CURRENT_DIGEST`: lowercase 64-character hexadecimal digest. If absent, access is disabled, even if a previous digest is configured. Other Core features continue working.
-- `CORE_BOOKING_SERVICE_PREVIOUS_DIGEST`: optional previous digest during rotation.
+Raw credentials are 43-128 URL-safe ASCII characters backed by at least 32 random bytes. Core
+hashes the submitted secret and performs constant-time comparisons against both configured slots
+without short-circuiting the comparisons. Neither the raw credential nor either digest appears in
+responses. Generate local material with
+`uv run --locked python scripts/init-booking-credential.py`; transfer the raw secret to Booking
+only through private deployment secret management.
 
-Settings hide digests from representations and dumps. Both supplied digest comparisons use constant-time comparison. Raw secrets must be 43-128 URL-safe ASCII characters (`A-Z`, `a-z`, digits, `_`, `-`); malformed/oversized credentials fail before hashing/database work. Generate at least 32 random bytes, never a human password. The two slots identify only the single Booking service and authorize only this Booking permission contract, not tenant or platform APIs.
+Production calls require direct private HTTPS. Plain HTTP is accepted only in explicit local mode
+from a loopback peer. The public gateway must not route `/internal`; private gateway, application,
+APM, and access logs must redact `Authorization`, `X-Core-Session`, cookies, and request bodies.
 
-Local setup, from the Core root:
+## Default Booking administrator provisioning
 
-```powershell
-. ./scripts/use-tools.ps1
-uv run --locked python scripts/init-booking-credential.py
-```
-
-This writes `.secrets/booking-service.secret` (raw, 32 random bytes encoded URL-safe) and `.secrets/booking-service.sha256` (matching digest), prints only relative paths/instructions, and never edits `.env` or Booking. `.secrets/` is ignored. Exclusive creation refuses either existing file. If disk/permission failure interrupts creation, inspect the new files locally; the helper retains placeholders rather than deleting files. Never overwrite a working pair to fix setup. Restrict the directory's Windows ACL to the operator; Git ignore is not access control.
-
-Securely transfer the raw secret to Booking's private configuration through the deployment secret manager or another authenticated encrypted channel in a later Booking task. Core only needs the digest. Do not put secrets in command arguments, URLs, tickets, logs, documentation, or Git.
-
-Rotation: generate a new pair in controlled private storage (preserve the old files; the helper intentionally refuses overwrites). Deploy Core with new=current and old=previous digests, deploy Booking with the new raw secret, verify calls, then remove Core's previous digest and retire the old secret. Restart/redeploy Core to load changed configuration. Do not leave old credentials enabled indefinitely; incidents may require immediate removal rather than an overlap. This checkpoint does not modify Booking or automate transfer.
-
-Deployed calls require **direct HTTPS over a private network**. Core accepts HTTPS as reported by its trusted server transport; do not enable arbitrary proxy-header trust. Run with `--no-proxy-headers`. A future TLS-terminating proxy arrangement requires an explicitly reviewed trusted transport design; untrusted `X-Forwarded-Proto` is not a workaround. Plain HTTP is permitted only with explicitly selected development/test mode and a loopback peer. Bind the local API to loopback.
-
-The public production gateway must not route `/internal` paths. Restrict the private listener to Booking and redact `Authorization`, `X-Core-Session`, cookies, and request bodies from gateway/APM/access/debug logs. Network isolation does not replace the service credential. There are no request-controlled outbound URLs; Core makes no outbound request here.
-
-## Explicit initial Booking permission delegation
-
-Historical migration `0006_booking_authorization` added the initial two Booking inventory codes and nullable role provenance. Migration `0007_permission_registry` replaces the enumerated permission CHECK with the Core-owned registry and registers the final reviewed vocabulary. Migration `0008_delegated_grant_authority` adds delegation metadata; the dedicated Booking role remains non-delegating. Enabling Booking grants no user permission.
-
-A platform operator explicitly calls:
+The existing platform-only route remains for compatibility:
 
 ```text
 POST /platform/organizations/{organization_id}/booking-inventory-administrator
 Origin: <configured browser origin>
-Cookie: <existing authenticated operator session>
+Cookie: <active platform operator Core session>
+
+{"membership_id":"<active same-organization membership UUID>"}
 ```
 
-```json
-{"membership_id":"<active organization administrator membership UUID>"}
-```
+Despite the historical route name and persisted `booking_inventory` provenance marker, new
+provisioning creates the dedicated `Booking administrator` organization role. It assigns all 11
+Booking permissions above with `can_grant=false`, no Core permissions, and no platform authority.
+The operation requires current platform authority, an active enabled organization, an active
+recipient membership/user, and the recipient's current `core.roles.assign` permission.
 
-It requires current platform authority, active organization, enabled Booking, an active same-organization membership/user, and the recipient's current `core.roles.assign` permission. It locks the organization inside the transaction and creates/updates only the marked `Booking inventory administrator` role with the two explicit Booking permissions and `can_grant=false`. A same-name unmarked role, renamed/archived marked role, or marked role carrying unrelated permissions causes 409; nothing is taken over. Tenant role APIs cannot set the provenance marker or platform privileges.
+Provisioning changes only the dedicated marked role and the requested membership assignment.
+Arbitrary custom roles are never modified. A marked role with unrelated permissions, an archived
+or tenant-renamed marked role, or a conflicting reserved name fails closed. Matching reruns are
+idempotent. An explicit authorized rerun may restore missing reviewed Booking permissions and may
+evolve the legacy dedicated `Booking inventory administrator` name to `Booking administrator`;
+the permission/name transition is audited. Nothing is regranted at startup, entitlement enable,
+or migration time.
 
-Assignment, permission changes, and audits commit atomically. Role audits record the actual operator and permission changes; platform audit targets the membership and records assigned state, role ID and permissions. Matching reruns make no changes or audit entries. Explicit reruns can restore missing Booking permissions/assignments on the still-designated active role; updating a shared role affects its existing assignees, so operators must review those assignments. There is no automatic regrant on startup, migration, or entitlement enablement. Tenant removal/revocation remains effective until an explicitly authorized provisioning/delegation action.
+Because all provisioned Booking permissions have `can_grant=false`, possessing the role does not
+allow the recipient to delegate those permissions. This preserves CORE-AUTH-002's separation of
+permission use from grant authority.
 
-Success returns organization ID, membership ID, role ID and the two permission codes. This is a platform provisioning response, not the minimal internal authorization response. Normal tenant role APIs retain grant ceilings and last-admin checks; after provisioning, the recipient may delegate the Booking permissions they hold.
+## `/auth/context` versus this decision
 
-## Booking client obligations and versioning
+`GET /auth/context` is informational UX context. It exposes a current-state snapshot so a trusted
+frontend can shape navigation, but its role names, permission list, grant-authority list, enabled
+module list, and selected organization ID are never authorization evidence.
 
-The future Booking client must use a fixed configured HTTPS Core base URL, certificate verification, bounded connect/read/total timeouts (initial target: connect 2 seconds, total 5 seconds; verify against deployment), and no redirect following. Forward only the existing user token and Booking service credential to the fixed route. Do not forward browser-supplied service credentials. Do not cache positive decisions or retry indefinitely.
+`POST /internal/v1/booking/authorize` is the authoritative service decision. It independently
+revalidates the service, session, active user, active tenant relationship, one exact permission,
+and Booking entitlement. A Booking permission can therefore still appear in `/auth/context` while
+an internal request is denied because the entitlement is disabled; conversely, entitlement alone
+never supplies a missing permission. Both paths derive membership and effective permission state
+from the same current Core repository queries rather than session claims.
 
-Validate HTTP status, JSON shape, `authorized` being exactly true, requested organization/permission matching the verified response, and a valid user UUID. Treat 401/403/404 as explicit denials. Treat 422 as a contract/request defect. Treat 503, timeouts, network/TLS failures, malformed responses, unexpected status/redirect, and invalid IDs as unavailable/unverifiable authorization. Distinguish denials from availability failures for user-facing errors and monitoring, but fail closed in both cases. Never fabricate an allow decision on Core downtime. Booking must still scope every database operation to the verified organization and implement its browser CSRF policy. Do not reuse decisions across later requests/jobs.
+## Persistence and next integration step
 
-`/internal/v1` freezes this request/success/error shape, permission scope, and authentication semantics. Breaking changes require a separately versioned route and coordinated rollout. Additive permission support must be explicitly documented/tested by both repositories; v1 callers cannot assume arbitrary future codes are accepted. No client implementation is claimed here.
+No CORE-AUTH-006 migration is required. Migrations through `0010_account_onboarding` already
+contain the final permission registry, role provenance, grant metadata, entitlement, and session
+models. Existing installations change the dedicated role only when an operator explicitly invokes
+provisioning, which keeps upgrades from silently changing tenant grants.
 
-## Manual PowerShell walkthrough
-
-Use the existing operator, owner, organization and enabled entitlement. Do not rerun user provisioning, onboarding, or platform bootstrap. Run from the Core root. Existing `.env` stays private. Use terminal A for the API and terminal B for verification.
-
-1. **Prepare the new migration and local service credential (terminal B).** Review the migration, then run manually against development. The helper is one-time; if the pair already exists, skip its command after verifying its provenance locally.
-
-   ```powershell
-   . ./scripts/use-tools.ps1
-   $env:CORE_ENVIRONMENT = 'development'
-   uv run --locked alembic upgrade head
-   uv run --locked alembic current
-   uv run --locked python scripts/init-booking-credential.py
-   ```
-
-   Expected head: `0008_delegated_grant_authority`. Neither command was run against development by Codex.
-
-2. **Restart the API yourself in terminal A and leave it running.** Stop the previous process with Ctrl+C; load only the digest without printing it. Environment settings in terminal B do not configure terminal A.
-
-   ```powershell
-   . ./scripts/use-tools.ps1
-   $env:CORE_ENVIRONMENT = 'development'
-   $env:CORE_AUTH_ALLOWED_ORIGINS = '["http://127.0.0.1:18080"]'
-   $env:CORE_BOOKING_SERVICE_CURRENT_DIGEST = (Get-Content -Raw .secrets/booking-service.sha256).Trim()
-   [Environment]::SetEnvironmentVariable('CORE_BOOKING_SERVICE_PREVIOUS_DIGEST', $null)
-   uv run --locked uvicorn editingtab_core.app:create_app --factory --host 127.0.0.1 --port 18080 --no-proxy-headers
-   ```
-
-3. **Login securely in terminal B.** Keep both sessions in memory; never print them.
-
-   ```powershell
-   $base = 'http://127.0.0.1:18080'
-   $origin = @{ Origin = $base }
-   function Open-CoreSession([string]$Email) {
-       $secure = Read-Host "Password for $Email" -AsSecureString
-       $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-       try {
-           $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-           $json = @{ email = $Email; password = $plain } | ConvertTo-Json -Compress
-           $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-           $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-           $null = Invoke-WebRequest "$base/auth/login" -Method Post -WebSession $web -Headers $origin -ContentType 'application/json; charset=utf-8' -Body $bytes -UseBasicParsing
-           return $web
-       } finally {
-           [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-           if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
-           $plain = $null; $json = $null; $secure = $null
-       }
-   }
-   $operatorSession = Open-CoreSession 'operator@example.test'
-   $ownerSession = Open-CoreSession 'demo@example.test'
-   $owner = Invoke-RestMethod "$base/auth/me" -WebSession $ownerSession
-   $offset = 0; $client = $null
-   do {
-       $page = Invoke-RestMethod "$base/platform/organizations?limit=100&offset=$offset" -WebSession $operatorSession
-       $client = $page | Where-Object slug -eq 'core-006-demo-client'
-       $offset += 100
-   } while (-not $client -and $page.Count -eq 100)
-   if (-not $client) { throw 'Existing demo organization not found; do not create a replacement.' }
-   $orgId = $client.id
-   $offset = 0; $member = $null
-   do {
-       $page = Invoke-RestMethod "$base/organizations/$orgId/members?limit=100&offset=$offset" -WebSession $ownerSession
-       $member = $page | Where-Object user_id -eq $owner.id
-       $offset += 100
-   } while (-not $member -and $page.Count -eq 100)
-   if (-not $member) { throw 'Existing owner membership not found.' }
-   $state = Invoke-RestMethod "$base/organizations/$orgId/modules" -WebSession $ownerSession
-   if ($state.enabled_modules -notcontains 'booking') { throw 'Booking must already be enabled; review platform state.' }
-   ```
-
-4. **Load the raw credential privately and demonstrate initial denial.** This helper prints only verified success fields or the error code/status, not headers. Before the first explicit grant the expected response is `403 permission_denied`; on a later walkthrough rerun, skip that initial-denial assertion if permission was already deliberately provisioned.
-
-   ```powershell
-   $serviceSecret = (Get-Content -Raw .secrets/booking-service.secret).Trim()
-   $userToken = $ownerSession.Cookies.GetCookies([uri]$base)['editingtab_session'].Value
-   $internalHeaders = @{ Authorization = "Bearer $serviceSecret"; 'X-Core-Session' = $userToken }
-   $body = @{ organization_id = $orgId; permission = 'booking.inventory.read' }
-   function Test-CoreDecision([hashtable]$Headers, [hashtable]$Body, [int]$ExpectedStatus, [string]$ExpectedCode = '') {
-       $bytes = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Compress))
-       $result = $null
-       try {
-           $response = Invoke-WebRequest "$base/internal/v1/booking/authorize" -Method Post -Headers $Headers -ContentType 'application/json; charset=utf-8' -Body $bytes -UseBasicParsing
-           $status = [int]$response.StatusCode
-           $result = $response.Content | ConvertFrom-Json
-       } catch {
-           if ($null -eq $_.Exception.Response) { throw 'Core authorization transport failure; fail closed.' }
-           $status = [int]$_.Exception.Response.StatusCode
-           try { $result = $_.ErrorDetails.Message | ConvertFrom-Json } catch { throw 'Unverifiable Core response; fail closed.' }
-       }
-       if ($status -ne $ExpectedStatus) { throw "Unexpected authorization status: $status" }
-       if ($status -eq 200) {
-           if ($result.authorized -ne $true -or $result.organization_id -ne $Body.organization_id -or $result.permission -ne $Body.permission -or $result.user_id -ne $owner.id) { throw 'Authorization response mismatch.' }
-           $result | Select-Object authorized, user_id, organization_id, permission
-       } else {
-           if ($result.error -ne $ExpectedCode) { throw 'Unexpected authorization error code.' }
-           [pscustomobject]@{ Status = $status; Error = $result.error }
-       }
-   }
-   Test-CoreDecision $internalHeaders $body 403 'permission_denied'
-   ```
-
-5. **Explicitly provision the existing owner, then authorize.** This uses the operator session and existing Origin policy. Matching reruns are idempotent; conflicts require review, not role takeover.
-
-   ```powershell
-   $json = @{ membership_id = $member.id } | ConvertTo-Json -Compress
-   Invoke-RestMethod "$base/platform/organizations/$orgId/booking-inventory-administrator" -Method Post -WebSession $operatorSession -Headers $origin -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json))
-   Test-CoreDecision $internalHeaders $body 200
-   ```
-
-6. **Representative denials, logout, and memory cleanup (terminal B).** Finish logout/cleanup even if an earlier assertion fails. No database grants are removed by this walkthrough.
-
-   ```powershell
-   Test-CoreDecision @{ 'X-Core-Session' = $userToken } $body 401 'invalid_service_credentials'
-   Test-CoreDecision $internalHeaders @{ organization_id = $orgId; permission = 'core.roles.manage' } 422 'invalid_authorization_request'
-   $null = Invoke-WebRequest "$base/auth/logout" -Method Post -WebSession $ownerSession -Headers $origin -UseBasicParsing
-   Test-CoreDecision $internalHeaders $body 401 'invalid_user_session'
-   $null = Invoke-WebRequest "$base/auth/logout" -Method Post -WebSession $operatorSession -Headers $origin -UseBasicParsing
-   $internalHeaders.Clear()
-   $serviceSecret = $null; $userToken = $null
-   $ownerSession = $null; $operatorSession = $null
-   Remove-Variable internalHeaders, serviceSecret, userToken, ownerSession, operatorSession -ErrorAction SilentlyContinue
-   ```
-
-   Keep the ignored secret files private for the later Booking setup. Clearing references is not a guarantee of erasing managed-memory copies; logout revokes the tokens. After stopping terminal A, clear its process-local digest setting with `[Environment]::SetEnvironmentVariable('CORE_BOOKING_SERVICE_CURRENT_DIGEST', $null)` if no longer needed.
-
-## Verification and remaining work
-
-```powershell
-. ./scripts/use-tools.ps1
-uv sync --locked
-uv run --locked ruff check .
-uv run --locked ruff format --check .
-uv run --locked pytest -m 'not integration'
-./scripts/test-integration.ps1
-git diff --check
-```
-
-Migration verification runs only in the isolated test database and verifies preserved data, unchanged old role grants, new head, and repeat upgrade. Existing CI discovers these tests automatically. No dependency changes are required. Manual development migration/provisioning and deployed HTTPS/gateway behavior remain user/operator verification, not claims of agent execution. Booking client implementation, inventory, gateway deployment, recovery, invitations, domains, frontend, backups and restore testing remain separate work. Stop after CORE-007; no commit or push.
-
-Executed locally with Python 3.12.14: locked sync, Ruff lint, Ruff formatting (74 files), 131 unit/safety tests, and 140 integration-suite tests (135 PostgreSQL tests plus five repeated safety checks) passed. Migration preservation, reported head `0006_booking_authorization`, and repeated upgrade passed. The initial duplicate test basename and SQL line-length issues were corrected before these passing checks. No development migration, local credential generation, or permission provisioning was executed; no Booking file was changed. Remote CORE-007 GitHub Actions remains unexecuted until the user pushes.
+A later Booking-repository checkpoint must map every protected Booking operation to one exact code,
+forward the opaque Core session proof server-to-server, call the fixed v1 URL with bounded timeouts
+and no redirects, strictly validate the minimal response, fail closed, and scope all Booking data
+access to the returned organization. That future work must not expose the service credential to the
+frontend or trust frontend-provided authorization lists.

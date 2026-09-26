@@ -7,7 +7,7 @@ from sqlalchemy import select
 from editingtab_core.authorization import repository as repo
 from editingtab_core.authorization.models import MembershipRole, Role
 from editingtab_core.authorization.policy import (
-    BOOKING_INVENTORY_PERMISSIONS,
+    BOOKING_PERMISSIONS,
     ROLE_ASSIGN,
     Conflict,
     Inaccessible,
@@ -21,7 +21,8 @@ from editingtab_core.platform.services import (
     require_entitlement,
 )
 
-ROLE_NAME = "Booking inventory administrator"
+ROLE_NAME = "Booking administrator"
+LEGACY_ROLE_NAME = "Booking inventory administrator"
 KIND = "booking_inventory"
 
 
@@ -58,6 +59,7 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 Role.normalized_name == ROLE_NAME.lower(),
             )
         )
+        renamed = False
         if designated is None:
             if named is not None:
                 raise Conflict()
@@ -69,19 +71,24 @@ def provision(session, *, actor_id, organization_id, membership_id):
             )
             session.add(designated)
             session.flush()
-        elif (
-            designated.deleted_at is not None
-            or designated.name != ROLE_NAME
-            or named != designated.id
-        ):
+        elif designated.deleted_at is not None:
+            raise Conflict()
+        elif designated.name == LEGACY_ROLE_NAME:
+            if designated.normalized_name != LEGACY_ROLE_NAME.lower() or named is not None:
+                raise Conflict()
+            designated.name = ROLE_NAME
+            designated.normalized_name = ROLE_NAME.lower()
+            designated.updated_at = datetime.now(UTC)
+            renamed = True
+        elif designated.name != ROLE_NAME or named != designated.id:
             raise Conflict()
         before = repo.role_permission_grants(session, organization_id, designated.id)
         # Never remove unrelated privileges or take over a tenant-repurposed role.
-        if not before.keys() <= BOOKING_INVENTORY_PERMISSIONS:
+        if not before.keys() <= BOOKING_PERMISSIONS:
             raise Conflict()
         assignment = session.get(MembershipRole, (organization_id, membership_id, designated.id))
         was_assigned = assignment is not None
-        after = dict.fromkeys(BOOKING_INVENTORY_PERMISSIONS, False)
+        after = dict.fromkeys(BOOKING_PERMISSIONS, False)
         if before != after:
             designated.updated_at = datetime.now(UTC)
             repo.replace_permissions(session, organization_id, designated.id, after)
@@ -112,23 +119,31 @@ def provision(session, *, actor_id, organization_id, membership_id):
                 after,
                 membership_id,
             )
-        if before != after or not was_assigned:
+        if before != after or not was_assigned or renamed:
+            audit_before = {
+                "permissions": repo.permission_state(before),
+                "assigned": was_assigned,
+            }
+            audit_after = {
+                "role_id": str(designated.id),
+                "permissions": repo.permission_state(after),
+                "assigned": True,
+            }
+            if renamed:
+                audit_before["role_name"] = LEGACY_ROLE_NAME
+                audit_after["role_name"] = ROLE_NAME
             _audit(
                 session,
                 actor_id=actor_id,
                 organization_id=organization_id,
                 action="booking.permissions.provisioned",
                 target_id=membership_id,
-                before={"permissions": repo.permission_state(before), "assigned": was_assigned},
-                after={
-                    "role_id": str(designated.id),
-                    "permissions": repo.permission_state(after),
-                    "assigned": True,
-                },
+                before=audit_before,
+                after=audit_after,
             )
         return {
             "organization_id": organization_id,
             "membership_id": membership_id,
             "role_id": designated.id,
-            "permissions": sorted(BOOKING_INVENTORY_PERMISSIONS),
+            "permissions": sorted(BOOKING_PERMISSIONS),
         }
