@@ -159,10 +159,10 @@ from the same current Core repository queries rather than session claims.
 
 ## Persistence and next integration step
 
-No CORE-AUTH-006 migration is required. Migrations through `0010_account_onboarding` already
-contain the final permission registry, role provenance, grant metadata, entitlement, and session
-models. Existing installations change the dedicated role only when an operator explicitly invokes
-provisioning, which keeps upgrades from silently changing tenant grants.
+Migration `0011_booking_admin_permissions` upgrades only Core-designated legacy roles
+to the final permission set and role name. Migrations through `0010_account_onboarding`
+already contain the permission registry, role provenance, grant metadata, entitlement,
+and session models. Custom tenant roles are never changed by this migration.
 
 A later Booking-repository checkpoint must map every protected Booking operation to one exact code,
 forward the opaque Core session proof server-to-server, call the fixed v1 URL with bounded timeouts

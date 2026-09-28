@@ -17,7 +17,7 @@ from editingtab_core.authorization.models import (
     Role,
     RolePermission,
 )
-from editingtab_core.authorization.policy import BOOKING_INVENTORY_PERMISSIONS
+from editingtab_core.authorization.policy import BOOKING_PERMISSIONS
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
 
@@ -114,7 +114,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             ),
             {"org": org_id, "role": role_id, "code": code},
         )
-    for code in BOOKING_INVENTORY_PERMISSIONS:
+    for code in {"booking.inventory.read", "booking.inventory.manage"}:
         connection.execute(
             text(
                 "INSERT INTO core_role_permissions (organization_id, role_id, code) "
@@ -168,7 +168,8 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                     RolePermission.role_id == booking_role_id
                 )
             ).all()
-        ) == dict.fromkeys(BOOKING_INVENTORY_PERMISSIONS, False)
+        ) == dict.fromkeys(BOOKING_PERMISSIONS, False)
+        assert session.get(Role, booking_role_id).name == "Booking administrator"
         assert authorization_repo.has_administrator(session, org_id)
         definitions = session.scalars(select(PermissionDefinition)).all()
         assert len(definitions) == 20
@@ -180,7 +181,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0010_account_onboarding"
+    assert expected_head == "0011_booking_admin_permissions"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -222,7 +223,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0010_account_onboarding"
+        == "0011_booking_admin_permissions"
     )
 
 

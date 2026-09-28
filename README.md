@@ -31,7 +31,7 @@ CORE-002 provides configuration, health endpoints, PostgreSQL connectivity, migr
 
 ## Structure and ownership
 
-`src/editingtab_core` contains application configuration, lifecycle, database session support, and health routes. `identity` contains Core-owned models, explicit repositories, and transaction-owning services. `auth` owns credentials, sessions, and login throttles. `migrations` retains the earlier revisions through `0010_account_onboarding`; migrations are never applied at application startup. `tests/unit` contains mocked/configuration tests; `tests/integration` contains real PostgreSQL tests and database safety checks. `scripts` contains small local helpers.
+`src/editingtab_core` contains application configuration, lifecycle, database session support, and health routes. `identity` contains Core-owned models, explicit repositories, and transaction-owning services. `auth` owns credentials, sessions, and login throttles. `migrations` retains the earlier revisions through `0011_booking_admin_permissions`; migrations are never applied at application startup. `tests/unit` contains mocked/configuration tests; `tests/integration` contains real PostgreSQL tests and database safety checks. `scripts` contains small local helpers.
 
 Core owns shared identity, organization authorization, and platform administration. Booking will own inventory and reservations. Core is a modular application; Booking now has a separate repository and database. Their connection uses an authenticated internal authorization contract, never shared database access. Future module interfaces must preserve ownership and prevent access to private tables; no empty domain layers or speculative tables have been added.
 
