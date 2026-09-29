@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from sqlalchemy.orm import Session
 
 from editingtab_core.auth.security import COOKIE_NAME
@@ -29,6 +29,57 @@ class RolePermissionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     code: str = Field(min_length=1, max_length=64)
     can_grant: bool
+
+
+class OrganizationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    name: str
+    slug: str
+
+
+class PermissionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    module: str
+    description: str
+    lifecycle: str
+
+
+class RolePermissionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    can_grant: bool
+
+
+class RoleOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    name: str
+    permissions: list[RolePermissionOutput]
+
+
+class RoleDetailOutput(RoleOutput):
+    state: str
+    system_managed: bool
+
+
+class MemberOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    membership_id: UUID
+    user_id: UUID
+    display_name: str
+    email: str
+    state: str
+    roles: list[RoleOutput]
+
+
+class MemberAccessOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    membership_id: UUID
+    state: str
+    effective_permissions: list[str]
+    effective_grant_authority: list[str]
 
 
 class RoleInput(BaseModel):
@@ -67,17 +118,27 @@ class MemberRestoreInput(BaseModel):
         return self
 
 
-@router.get("")
+class RoleMetadataInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=100)
+
+
+class PermissionGrantInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    can_grant: StrictBool = False
+
+
+@router.get("", response_model=list[OrganizationOutput])
 def organizations(session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0):
     return services.list_organizations(session, actor_id=actor_id, limit=limit, offset=offset)
 
 
-@router.get("/{organization_id}")
+@router.get("/{organization_id}", response_model=OrganizationOutput)
 def organization(organization_id: UUID, session: Database, actor_id: Actor):
     return services.read_organization(session, organization_id=organization_id, actor_id=actor_id)
 
 
-@router.get("/{organization_id}/members")
+@router.get("/{organization_id}/members", response_model=list[MemberOutput])
 def members(
     organization_id: UUID, session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0
 ):
@@ -86,7 +147,7 @@ def members(
     )
 
 
-@router.get("/{organization_id}/members/{membership_id}")
+@router.get("/{organization_id}/members/{membership_id}", response_model=MemberOutput)
 def member(organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor):
     return services.read_member(
         session,
@@ -96,7 +157,7 @@ def member(organization_id: UUID, membership_id: UUID, session: Database, actor_
     )
 
 
-@router.post("/{organization_id}/members")
+@router.post("/{organization_id}/members", response_model=MemberOutput)
 def add_member(organization_id: UUID, body: MemberInput, session: Database, actor_id: Actor):
     return services.add_member(
         session,
@@ -118,7 +179,7 @@ def archive_member(organization_id: UUID, membership_id: UUID, session: Database
     return Response(status_code=204)
 
 
-@router.post("/{organization_id}/members/{membership_id}/restore")
+@router.post("/{organization_id}/members/{membership_id}/restore", response_model=MemberOutput)
 def restore_member(
     organization_id: UUID,
     membership_id: UUID,
@@ -135,7 +196,19 @@ def restore_member(
     )
 
 
-@router.get("/{organization_id}/roles")
+@router.get("/{organization_id}/members/{membership_id}/access", response_model=MemberAccessOutput)
+def effective_access(
+    organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor
+):
+    return services.member_access(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+    )
+
+
+@router.get("/{organization_id}/roles", response_model=list[RoleOutput])
 def roles(
     organization_id: UUID, session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0
 ):
@@ -144,14 +217,14 @@ def roles(
     )
 
 
-@router.get("/{organization_id}/permissions")
+@router.get("/{organization_id}/permissions", response_model=list[PermissionOutput])
 def permissions(organization_id: UUID, session: Database, actor_id: Actor):
     return services.list_permission_catalog(
         session, organization_id=organization_id, actor_id=actor_id
     )
 
 
-@router.post("/{organization_id}/roles", status_code=201)
+@router.post("/{organization_id}/roles", status_code=201, response_model=RoleOutput)
 def create_role(organization_id: UUID, body: RoleInput, session: Database, actor_id: Actor):
     return services.create_role(
         session,
@@ -162,7 +235,31 @@ def create_role(organization_id: UUID, body: RoleInput, session: Database, actor
     )
 
 
-@router.put("/{organization_id}/roles/{role_id}")
+@router.get("/{organization_id}/roles/archived", response_model=list[RoleDetailOutput])
+def archived_roles(
+    organization_id: UUID,
+    session: Database,
+    actor_id: Actor,
+    limit: Limit = 50,
+    offset: Offset = 0,
+):
+    return services.list_archived_roles(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{organization_id}/roles/{role_id}", response_model=RoleDetailOutput)
+def role(organization_id: UUID, role_id: UUID, session: Database, actor_id: Actor):
+    return services.read_role(
+        session, organization_id=organization_id, actor_id=actor_id, role_id=role_id
+    )
+
+
+@router.put("/{organization_id}/roles/{role_id}", response_model=RoleOutput)
 def update_role(
     organization_id: UUID, role_id: UUID, body: RoleInput, session: Database, actor_id: Actor
 ):
@@ -176,12 +273,75 @@ def update_role(
     )
 
 
+@router.patch("/{organization_id}/roles/{role_id}", response_model=RoleDetailOutput)
+def update_role_metadata(
+    organization_id: UUID,
+    role_id: UUID,
+    body: RoleMetadataInput,
+    session: Database,
+    actor_id: Actor,
+):
+    return services.update_role_metadata(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        role_id=role_id,
+        name=body.name,
+    )
+
+
 @router.delete("/{organization_id}/roles/{role_id}", status_code=204)
 def archive_role(organization_id: UUID, role_id: UUID, session: Database, actor_id: Actor):
     services.archive_role(
         session, organization_id=organization_id, actor_id=actor_id, role_id=role_id
     )
     return Response(status_code=204)
+
+
+@router.post("/{organization_id}/roles/{role_id}/restore", response_model=RoleDetailOutput)
+def restore_role(organization_id: UUID, role_id: UUID, session: Database, actor_id: Actor):
+    return services.restore_role(
+        session, organization_id=organization_id, actor_id=actor_id, role_id=role_id
+    )
+
+
+@router.put(
+    "/{organization_id}/roles/{role_id}/permissions/{code}",
+    response_model=RoleDetailOutput,
+)
+def grant_permission(
+    organization_id: UUID,
+    role_id: UUID,
+    code: str,
+    body: PermissionGrantInput,
+    session: Database,
+    actor_id: Actor,
+):
+    return services.change_role_permission(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        role_id=role_id,
+        code=code,
+        can_grant=body.can_grant,
+    )
+
+
+@router.delete(
+    "/{organization_id}/roles/{role_id}/permissions/{code}",
+    response_model=RoleDetailOutput,
+)
+def revoke_permission(
+    organization_id: UUID, role_id: UUID, code: str, session: Database, actor_id: Actor
+):
+    return services.change_role_permission(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        role_id=role_id,
+        code=code,
+        remove=True,
+    )
 
 
 @router.put("/{organization_id}/members/{membership_id}/roles/{role_id}", status_code=204)

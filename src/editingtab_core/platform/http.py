@@ -25,22 +25,54 @@ class EntitlementInput(BaseModel):
     enabled: StrictBool
 
 
-@router.get("/organizations")
+class PlatformOrganizationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    name: str
+    slug: str
+
+
+class PlatformOrganizationDetailOutput(PlatformOrganizationOutput):
+    enabled_modules: list[str]
+
+
+class EntitlementsOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    organization_id: UUID
+    enabled_modules: list[str]
+
+
+class BookingProvisionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    organization_id: UUID
+    membership_id: UUID
+    role_id: UUID
+    permissions: list[str]
+
+
+@router.get("/organizations", response_model=list[PlatformOrganizationOutput])
 def organizations(session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0):
     return services.list_organizations(session, actor_id=actor_id, limit=limit, offset=offset)
 
 
-@router.post("/organizations", status_code=201)
+@router.post("/organizations", status_code=201, response_model=PlatformOrganizationDetailOutput)
 def onboard(body: OnboardingInput, session: Database, actor_id: Actor):
     return services.onboard(session, actor_id=actor_id, **body.model_dump())
 
 
-@router.get("/organizations/{organization_id}/modules")
+@router.get("/organizations/{organization_id}", response_model=PlatformOrganizationDetailOutput)
+def organization(organization_id: UUID, session: Database, actor_id: Actor):
+    return services.read_organization(session, actor_id=actor_id, organization_id=organization_id)
+
+
+@router.get("/organizations/{organization_id}/modules", response_model=EntitlementsOutput)
 def modules(organization_id: UUID, session: Database, actor_id: Actor):
     return services.read_entitlements(session, actor_id=actor_id, organization_id=organization_id)
 
 
-@router.put("/organizations/{organization_id}/modules/{module_code}")
+@router.put(
+    "/organizations/{organization_id}/modules/{module_code}", response_model=EntitlementsOutput
+)
 def update_module(
     organization_id: UUID,
     module_code: str,
@@ -57,7 +89,7 @@ def update_module(
     )
 
 
-@tenant_router.get("/{organization_id}/modules")
+@tenant_router.get("/{organization_id}/modules", response_model=EntitlementsOutput)
 def tenant_modules(organization_id: UUID, session: Database, actor_id: Actor):
     return services.tenant_entitlements(session, actor_id=actor_id, organization_id=organization_id)
 
@@ -67,7 +99,10 @@ class BookingProvisionInput(BaseModel):
     membership_id: UUID
 
 
-@router.post("/organizations/{organization_id}/booking-inventory-administrator")
+@router.post(
+    "/organizations/{organization_id}/booking-inventory-administrator",
+    response_model=BookingProvisionOutput,
+)
 def booking_administrator(
     organization_id: UUID, body: BookingProvisionInput, session: Database, actor_id: Actor
 ):

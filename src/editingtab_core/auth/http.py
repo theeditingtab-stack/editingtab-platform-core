@@ -1,9 +1,10 @@
 """Cookie endpoints and fail-closed Origin protection for the same-origin demo."""
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
@@ -125,11 +126,28 @@ class InvitationInput(BaseModel):
         return self
 
 
+class InvitationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    email: str
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None = None
+    revoked_at: datetime | None = None
+    role_ids: list[UUID]
+    development_token: str | None = None
+
+
 def actor(request: Request, session: Annotated[Session, Depends(get_session)]) -> UUID:
     return services.current_user(session, request.cookies.get(COOKIE_NAME)).id
 
 
-@invitation_router.post("/{organization_id}/invitations", status_code=201)
+@invitation_router.post(
+    "/{organization_id}/invitations",
+    status_code=201,
+    response_model=InvitationOutput,
+    response_model_exclude_none=True,
+)
 def create_invitation(
     organization_id: UUID,
     body: InvitationInput,
@@ -137,7 +155,7 @@ def create_invitation(
     session: Annotated[Session, Depends(get_session)],
     actor_id: Annotated[UUID, Depends(actor)],
 ):
-    return services.create_invitation(
+    result = services.create_invitation(
         session,
         settings=request.app.state.settings,
         organization_id=organization_id,
@@ -145,15 +163,31 @@ def create_invitation(
         email=body.email,
         role_ids=body.role_ids,
     )
+    token = result.pop("token")
+    if request.app.state.settings.environment != "production":
+        result["development_token"] = token
+    return result
 
 
-@invitation_router.get("/{organization_id}/invitations")
+@invitation_router.get(
+    "/{organization_id}/invitations",
+    response_model=list[InvitationOutput],
+    response_model_exclude_none=True,
+)
 def invitations(
     organization_id: UUID,
     session: Annotated[Session, Depends(get_session)],
     actor_id: Annotated[UUID, Depends(actor)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0, le=100000)] = 0,
 ):
-    return services.list_invitations(session, organization_id=organization_id, actor_id=actor_id)
+    return services.list_invitations(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @invitation_router.delete("/{organization_id}/invitations/{invitation_id}", status_code=204)

@@ -175,6 +175,17 @@ def membership_roles(session, organization_id, membership_id):
     )
 
 
+def role_assignments(session, organization_id, role_id):
+    return list(
+        session.scalars(
+            select(MembershipRole).where(
+                MembershipRole.organization_id == organization_id,
+                MembershipRole.role_id == role_id,
+            )
+        )
+    )
+
+
 def replace_permissions(session, organization_id, role_id, permissions):
     session.execute(
         delete(RolePermission).where(

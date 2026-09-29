@@ -28,7 +28,7 @@ packages = ["src/editingtab_core"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = [".tools", ".venv"]
+extend-exclude = [".tools", ".venv", ".pytest-run-*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

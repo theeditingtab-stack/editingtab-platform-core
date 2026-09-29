@@ -12,11 +12,12 @@ unsafe-method Origin enforcement remain in force.
 
 An invitation belongs to one organization and records a normalized target email, inviter, expiry,
 lifecycle timestamps, and optional initial role IDs. Only a SHA-256 digest of its random 256-bit
-URL-safe token is stored. With no outbound provider yet, the raw token is returned once in the
-authenticated `201` creation response. The caller must use a confidential delivery channel and
-must not log it or persist it in frontend assets.
+URL-safe token is stored. Production HTTP responses do not return the raw token. With no outbound
+provider yet, explicit development/test mode returns it once as `development_token`; the caller
+must use a confidential delivery channel and must not log it or persist it in frontend assets.
+Production invitation delivery therefore still requires an adapter at the service boundary.
 
-Creation, listing, and revocation require an active session and `core.members.manage`. Initial
+Creation, paginated listing, and revocation require an active session and `core.members.manage`. Initial
 roles additionally require `core.roles.assign`; roles must be active in that organization and
 within the actor's CORE-AUTH-002 grant ceiling. An active member conflicts. Reissue for the same
 organization/email revokes and audits the prior pending invitation. Archived membership targets

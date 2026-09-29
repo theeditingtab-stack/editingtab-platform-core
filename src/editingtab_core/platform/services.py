@@ -159,6 +159,13 @@ def list_organizations(session, *, actor_id, limit=50, offset=0):
         ]
 
 
+def read_organization(session, *, actor_id, organization_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        org = _organization(session, organization_id)
+        return {**_info(org), "enabled_modules": _enabled(session, organization_id)}
+
+
 def onboard(session, *, actor_id, name, slug, owner_email, enabled_modules=()):
     try:
         with transaction(session):
