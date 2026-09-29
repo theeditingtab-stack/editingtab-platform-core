@@ -60,6 +60,10 @@ class LastAdministrator(Conflict):
     message = "An active organization must retain an active administrator."
 
 
+class ProtectedRole(LastAdministrator):
+    message = "System-managed roles cannot be changed through organization administration."
+
+
 class StorageUnavailable(AccessError):
     status = 503
     message = "Organization operation unavailable."

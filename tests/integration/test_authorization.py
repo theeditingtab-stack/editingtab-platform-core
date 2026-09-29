@@ -33,6 +33,7 @@ from editingtab_core.authorization.policy import (
     Inaccessible,
     InvalidPermission,
     LastAdministrator,
+    ProtectedRole,
     StorageUnavailable,
 )
 from editingtab_core.identity import services as identity
@@ -414,6 +415,12 @@ def test_update_archive_and_assignment_validate_stronger_existing_role(identity_
     common = {"organization_id": env.org, "actor_id": env.user}
 
     attempts = [
+        lambda: access.update_role_metadata(
+            identity_session,
+            **common,
+            role_id=stronger,
+            name="Seized metadata",
+        ),
         lambda: access.update_role(
             identity_session,
             **common,
@@ -1169,3 +1176,157 @@ def test_member_audit_failure_rolls_back_membership(identity_session, setup):
             )
             is None
         )
+
+
+def test_management_role_permission_access_archive_and_restore(identity_session, setup):
+    env = setup
+    role = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Console role",
+        permissions={},
+    )["id"]
+    detail = access.update_role_metadata(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        role_id=role,
+        name="Console reader",
+    )
+    assert detail["name"] == "Console reader"
+    assert detail["state"] == "active" and detail["system_managed"] is False
+
+    detail = access.change_role_permission(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        role_id=role,
+        code="core.organization.read",
+    )
+    assert detail["permissions"] == [{"code": "core.organization.read", "can_grant": False}]
+    assign(identity_session, env, role)
+    effective = access.member_access(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=env.member,
+    )
+    assert effective["effective_permissions"] == ["core.organization.read"]
+    assert effective["effective_grant_authority"] == []
+
+    access.archive_role(identity_session, organization_id=env.org, actor_id=env.owner, role_id=role)
+    assert (
+        access.read_role(
+            identity_session, organization_id=env.org, actor_id=env.owner, role_id=role
+        )["state"]
+        == "archived"
+    )
+    assert [
+        item["id"]
+        for item in access.list_archived_roles(
+            identity_session, organization_id=env.org, actor_id=env.owner
+        )
+    ] == [role]
+    restored = access.restore_role(
+        identity_session, organization_id=env.org, actor_id=env.owner, role_id=role
+    )
+    assert restored["state"] == "active"
+    assert (
+        access.member_access(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            membership_id=env.member,
+        )["effective_permissions"]
+        == []
+    )
+    with identity_session.begin():
+        assert identity_session.get(MembershipRole, (env.org, env.member, role)) is None
+
+    revoked = access.change_role_permission(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        role_id=role,
+        code="core.organization.read",
+        remove=True,
+    )
+    assert revoked["permissions"] == []
+
+
+def test_management_http_boundaries_and_system_role_protection(
+    identity_session, setup, clients, integration_settings
+):
+    env = setup
+    role = create(identity_session, env, "HTTP console", [])
+    other = bootstrap(
+        identity_session,
+        settings=integration_settings,
+        email="owner@example.test",
+        slug="console-other",
+        name="Console other",
+    )
+    with identity_session.begin():
+        foreign_role = identity_session.scalar(select(Role.id).where(Role.organization_id == other))
+
+    for operation in (
+        lambda: access.update_role_metadata(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            role_id=env.owner_role,
+            name="Changed owner",
+        ),
+        lambda: access.change_role_permission(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            role_id=env.owner_role,
+            code="core.organization.read",
+            remove=True,
+        ),
+    ):
+        with pytest.raises(ProtectedRole):
+            operation()
+
+    root = f"/organizations/{env.org}"
+    with clients() as owner, clients("member@example.test") as member:
+        role_path = f"{root}/roles/{role}"
+        assert owner.get(role_path).json()["state"] == "active"
+        assert owner.get(f"{root}/roles/archived").json() == []
+        assert (
+            owner.patch(
+                role_path,
+                json={"name": "HTTP renamed"},
+                headers={"Origin": ORIGIN},
+            ).json()["name"]
+            == "HTTP renamed"
+        )
+        permission_path = role_path + "/permissions/core.organization.read"
+        assert (
+            owner.put(
+                permission_path,
+                json={"can_grant": False},
+                headers={"Origin": ORIGIN},
+            ).status_code
+            == 200
+        )
+        assert (
+            owner.put(
+                f"{root}/members/{env.member}/roles/{role}", headers={"Origin": ORIGIN}
+            ).status_code
+            == 204
+        )
+        effective = owner.get(f"{root}/members/{env.member}/access").json()
+        assert effective["effective_permissions"] == ["core.organization.read"]
+        assert owner.get(f"{root}/roles/{foreign_role}").status_code == 404
+        assert (
+            member.put(
+                permission_path,
+                json={"can_grant": True},
+                headers={"Origin": ORIGIN},
+            ).status_code
+            == 403
+        )
+        assert owner.delete(permission_path, headers={"Origin": ORIGIN}).status_code == 200

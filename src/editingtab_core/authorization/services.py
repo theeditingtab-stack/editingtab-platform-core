@@ -19,6 +19,7 @@ from editingtab_core.authorization.policy import (
     Inaccessible,
     InvalidPermission,
     LastAdministrator,
+    ProtectedRole,
     StorageUnavailable,
     role_name,
 )
@@ -83,6 +84,18 @@ def _role(session, organization_id, role_id, *, archived=False):
     return role
 
 
+def _system_managed(role):
+    # Owner roles predate an explicit kind column. Their reserved bootstrap name,
+    # plus the existing Booking provisioning marker, are stable system identities.
+    return role.normalized_name == "organization owner" or role.provisioning_kind is not None
+
+
+def _custom_role(role):
+    if _system_managed(role):
+        raise ProtectedRole()
+    return role
+
+
 def _grantable(grant_authority, permissions):
     if not permissions.keys() <= grant_authority:
         raise AccessError()
@@ -120,6 +133,14 @@ def _role_info(session, role):
         "permissions": repo.permission_state(
             repo.role_permission_grants(session, role.organization_id, role.id)
         ),
+    }
+
+
+def _role_detail(session, role):
+    return {
+        **_role_info(session, role),
+        "state": "archived" if role.deleted_at is not None else "active",
+        "system_managed": _system_managed(role),
     }
 
 
@@ -188,6 +209,27 @@ def read_member(session, *, organization_id, actor_id, membership_id):
         if row is None:
             raise Inaccessible()
         return _member_info(session, *row)
+
+
+def member_access(session, *, organization_id, actor_id, membership_id):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, "core.members.read")
+        row = session.execute(
+            repo.members(organization_id).where(Membership.id == membership_id)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        membership, _ = row
+        return {
+            "membership_id": membership.id,
+            "state": "archived" if membership.deleted_at is not None else "active",
+            "effective_permissions": sorted(
+                repo.effective_permissions(session, organization_id, membership.user_id)
+            ),
+            "effective_grant_authority": sorted(
+                repo.effective_grant_authority(session, organization_id, membership.user_id)
+            ),
+        }
 
 
 def _initial_roles(session, organization_id, actor_id, role_ids):
@@ -332,6 +374,26 @@ def list_roles(session, *, organization_id, actor_id, limit=50, offset=0):
         return [_role_info(session, role) for role in roles]
 
 
+def read_role(session, *, organization_id, actor_id, role_id):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, "core.roles.read")
+        return _role_detail(session, _role(session, organization_id, role_id, archived=True))
+
+
+def list_archived_roles(session, *, organization_id, actor_id, limit=50, offset=0):
+    _page(limit, offset)
+    with transaction(session):
+        authorize(session, organization_id, actor_id, "core.roles.read")
+        roles = session.scalars(
+            select(Role)
+            .where(Role.organization_id == organization_id, Role.deleted_at.is_not(None))
+            .order_by(Role.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return [_role_detail(session, role) for role in roles]
+
+
 def list_permission_catalog(session, *, organization_id, actor_id):
     with transaction(session):
         authorize(session, organization_id, actor_id, "core.roles.read")
@@ -365,7 +427,7 @@ def update_role(session, *, organization_id, actor_id, role_id, name, permission
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
         grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
-        role = _role(session, organization_id, role_id)
+        role = _custom_role(_role(session, organization_id, role_id))
         before = repo.role_permission_grants(session, organization_id, role_id)
         after = _permissions(session, permissions if permissions is not None else codes or [])
         _grantable(grant_authority, before)
@@ -378,16 +440,99 @@ def update_role(session, *, organization_id, actor_id, role_id, name, permission
         return _role_info(session, role)
 
 
+def update_role_metadata(session, *, organization_id, actor_id, role_id, name):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
+        role = _custom_role(_role(session, organization_id, role_id))
+        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        permissions = repo.role_permission_grants(session, organization_id, role_id)
+        _grantable(authority, permissions)
+        role.name, role.normalized_name = role_name(name)
+        role.updated_at = datetime.now(UTC)
+        repo.audit(
+            session,
+            organization_id,
+            actor_id,
+            "role.metadata.updated",
+            role_id,
+            permissions,
+            permissions,
+        )
+        return _role_detail(session, role)
+
+
+def change_role_permission(
+    session, *, organization_id, actor_id, role_id, code, can_grant=False, remove=False
+):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
+        role = _custom_role(_role(session, organization_id, role_id))
+        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        before = repo.role_permission_grants(session, organization_id, role_id)
+        if repo.assignable_permission_codes(session, [code]) != {code}:
+            raise InvalidPermission()
+        if code not in authority:
+            raise AccessError()
+        after = dict(before)
+        if remove:
+            if code not in after:
+                return _role_detail(session, role)
+            del after[code]
+            action = "role.permission.revoked"
+        else:
+            if after.get(code) is can_grant and code in after:
+                return _role_detail(session, role)
+            after[code] = can_grant
+            action = "role.permission.granted"
+        _grantable(authority, before)
+        _grantable(authority, after)
+        role.updated_at = datetime.now(UTC)
+        repo.replace_permissions(session, organization_id, role_id, after)
+        ensure_administrator(session, organization_id)
+        repo.audit(session, organization_id, actor_id, action, role_id, before, after)
+        return _role_detail(session, role)
+
+
 def archive_role(session, *, organization_id, actor_id, role_id):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_ARCHIVE, lock=True)
         grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
-        role = _role(session, organization_id, role_id)
+        role = _custom_role(_role(session, organization_id, role_id))
         before = repo.role_permission_grants(session, organization_id, role_id)
         _grantable(grant_authority, before)
+        for assignment in repo.role_assignments(session, organization_id, role_id):
+            session.delete(assignment)
+            repo.audit(
+                session,
+                organization_id,
+                actor_id,
+                "assignment.removed",
+                role_id,
+                before,
+                {},
+                assignment.membership_id,
+            )
         role.deleted_at = datetime.now(UTC)
         ensure_administrator(session, organization_id)
         repo.audit(session, organization_id, actor_id, "role.archived", role_id, before, {})
+
+
+def restore_role(session, *, organization_id, actor_id, role_id):
+    with transaction(session):
+        authorize(session, organization_id, actor_id, ROLE_ARCHIVE, lock=True)
+        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        role = _custom_role(_role(session, organization_id, role_id, archived=True))
+        permissions = repo.role_permission_grants(session, organization_id, role_id)
+        _grantable(authority, permissions)
+        if role.deleted_at is None:
+            return _role_detail(session, role)
+        # Older archived rows may retain dormant assignments. Never reactivate them.
+        for assignment in repo.role_assignments(session, organization_id, role_id):
+            session.delete(assignment)
+        role.deleted_at = None
+        role.updated_at = datetime.now(UTC)
+        repo.audit(session, organization_id, actor_id, "role.restored", role_id, {}, permissions)
+        return _role_detail(session, role)
 
 
 def change_assignment(session, *, organization_id, actor_id, membership_id, role_id, remove=False):

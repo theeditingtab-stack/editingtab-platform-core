@@ -435,6 +435,7 @@ def test_platform_http_origin_input_validation_pagination_and_no_tenant_bypass(
         assert response.status_code == 201
         assert set(response.json()) == {"id", "name", "slug", "enabled_modules"}
         org = response.json()["id"]
+        assert client.get(f"/platform/organizations/{org}").json() == response.json()
         assert client.get(f"/organizations/{org}").status_code == 404
         assert client.get(f"/organizations/{org}/modules").status_code == 404
         assert (

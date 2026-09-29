@@ -361,13 +361,21 @@ def create_invitation(
     return result
 
 
-def list_invitations(session: Session, *, organization_id: UUID, actor_id: UUID):
+def list_invitations(
+    session: Session, *, organization_id: UUID, actor_id: UUID, limit: int = 50, offset: int = 0
+):
     with transaction(session):
         authorization_services.authorize(session, organization_id, actor_id, MEMBER_MANAGE)
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+            from editingtab_core.authorization.policy import InvalidPermission
+
+            raise InvalidPermission()
         rows = session.scalars(
             select(OrganizationInvitation)
             .where(OrganizationInvitation.organization_id == organization_id)
             .order_by(OrganizationInvitation.created_at.desc(), OrganizationInvitation.id)
+            .limit(limit)
+            .offset(offset)
         )
         return [
             {
