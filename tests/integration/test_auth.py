@@ -77,6 +77,8 @@ def test_real_login_hash_digest_cookie_profile_and_logout(
         response = login(client, email="  demo+ONE@EXAMPLE.TEST  ")
         assert response.status_code == 204
         assert response.content == b""
+        assert response.headers["access-control-allow-origin"] == ORIGIN
+        assert response.headers["access-control-allow-credentials"] == "true"
         cookie = response.headers["set-cookie"].lower()
         assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie
         assert "domain=" not in cookie and "secure" not in cookie
@@ -187,8 +189,10 @@ def test_production_cookie_attributes(clients, user_id, auth_settings):
         response = login(client, headers={"Origin": "https://demo.example"})
         assert response.status_code == 204
         cookie = response.headers["set-cookie"].lower()
-        assert "secure" in cookie and "httponly" in cookie and "samesite=lax" in cookie
+        assert "secure" in cookie and "httponly" in cookie and "samesite=none" in cookie
         assert "domain=" not in cookie and "path=/" in cookie
+        assert response.headers["access-control-allow-origin"] == "https://demo.example"
+        assert response.headers["access-control-allow-credentials"] == "true"
 
 
 def test_throttle_shared_across_apps_and_sources_then_recovers(

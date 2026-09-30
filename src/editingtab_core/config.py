@@ -59,6 +59,12 @@ class Settings(BaseSettings):
             self.environment in {"development", "test"} and "environment" in self.model_fields_set
         )
 
+    @property
+    def auth_cookie_samesite(self) -> Literal["lax", "none"]:
+        # SameSite=None is valid only with Secure. Local HTTP remains same-site when
+        # the frontend and API consistently use the same host with different ports.
+        return "none" if self.auth_secure_cookie else "lax"
+
     @model_validator(mode="after")
     def valid_origins(self):
         for origin in self.auth_allowed_origins:

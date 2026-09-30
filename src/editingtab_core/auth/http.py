@@ -1,4 +1,4 @@
-"""Cookie endpoints and fail-closed Origin protection for the same-origin demo."""
+"""Cookie endpoints and fail-closed Origin protection for browser clients."""
 
 from datetime import datetime
 from typing import Annotated
@@ -75,7 +75,7 @@ def login(body: LoginInput, request: Request, session: Annotated[Session, Depend
         max_age=settings.auth_session_seconds,
         secure=settings.auth_secure_cookie,
         httponly=True,
-        samesite="lax",
+        samesite=settings.auth_cookie_samesite,
         path="/",
     )
     return response
@@ -100,7 +100,7 @@ def logout(request: Request, session: Annotated[Session, Depends(get_session)]):
         path="/",
         secure=request.app.state.settings.auth_secure_cookie,
         httponly=True,
-        samesite="lax",
+        samesite=request.app.state.settings.auth_cookie_samesite,
     )
     return response
 
@@ -331,7 +331,7 @@ def revoke_all_sessions(request: Request, session: Annotated[Session, Depends(ge
         path="/",
         secure=request.app.state.settings.auth_secure_cookie,
         httponly=True,
-        samesite="lax",
+        samesite=request.app.state.settings.auth_cookie_samesite,
     )
     return response
 
@@ -352,7 +352,7 @@ def revoke_session(
             path="/",
             secure=request.app.state.settings.auth_secure_cookie,
             httponly=True,
-            samesite="lax",
+            samesite=request.app.state.settings.auth_cookie_samesite,
         )
     return response
 

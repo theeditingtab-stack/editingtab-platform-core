@@ -7,7 +7,12 @@ from sqlalchemy.exc import OperationalError
 
 from editingtab_core.app import create_app
 from editingtab_core.auth.provision import require_local
-from editingtab_core.auth.security import Passwords, token_digest, validate_password
+from editingtab_core.auth.security import (
+    AuthenticationError,
+    Passwords,
+    token_digest,
+    validate_password,
+)
 from editingtab_core.config import Settings
 from editingtab_core.database import get_session
 
@@ -42,6 +47,9 @@ def test_secure_cookie_only_disabled_in_explicit_local_mode(environment):
     kwargs = {"environment": environment} if environment else {}
     settings = Settings(_env_file=None, db_password="unit-only", **kwargs)
     assert settings.auth_secure_cookie is (environment not in {"development", "test"})
+    assert settings.auth_cookie_samesite == (
+        "lax" if environment in {"development", "test"} else "none"
+    )
     if environment not in {"development", "test"}:
         with pytest.raises(ValueError):
             require_local(settings)
@@ -200,3 +208,46 @@ def test_cli_rejects_password_arguments_without_echoing_them(monkeypatch, capsys
 def test_empty_origin_allowlist_fails_closed(settings):
     with TestClient(create_app(settings)) as client:
         assert client.post("/auth/login", headers={"Origin": ORIGIN}).status_code == 403
+
+
+def test_credentialed_cors_uses_only_the_exact_configured_origin(settings):
+    allowed = "http://127.0.0.1:5173"
+    app = create_app(settings.model_copy(update={"auth_allowed_origins": (allowed,)}))
+    session = MagicMock()
+    app.dependency_overrides[get_session] = lambda: session
+
+    with (
+        TestClient(app) as client,
+        patch(
+            "editingtab_core.auth.services.access_context",
+            side_effect=AuthenticationError("Authentication required."),
+        ),
+    ):
+        preflight = client.options(
+            "/auth/context",
+            headers={
+                "Origin": allowed,
+                "Access-Control-Request-Method": "PATCH",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+        )
+        denied_preflight = client.options(
+            "/auth/context",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        unauthorized = client.get("/auth/context", headers={"Origin": allowed})
+
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == allowed
+    assert preflight.headers["access-control-allow-credentials"] == "true"
+    assert "PATCH" in preflight.headers["access-control-allow-methods"]
+    assert "content-type" in preflight.headers["access-control-allow-headers"].lower()
+    assert denied_preflight.status_code == 400
+    assert "access-control-allow-origin" not in denied_preflight.headers
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["access-control-allow-origin"] == allowed
+    assert unauthorized.headers["access-control-allow-credentials"] == "true"
+    assert unauthorized.headers["cache-control"] == "no-store"
