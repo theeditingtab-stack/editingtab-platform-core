@@ -28,7 +28,7 @@ from editingtab_core.authorization.policy import (
 )
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Membership, Organization, User
-from editingtab_core.internal.booking import PATH
+from editingtab_core.internal.booking import DESTRUCTIVE_PATH, PATH
 from editingtab_core.platform import services as platform
 from editingtab_core.platform.booking_permissions import LEGACY_ROLE_NAME, ROLE_NAME, provision
 from editingtab_core.platform.models import PlatformAudit
@@ -39,6 +39,7 @@ PASSWORD = "synthetic integration password"
 CURRENT = "current-test-only-" + "c" * 32
 PREVIOUS = "previous-test-only-" + "p" * 32
 READ = "booking.inventory.read"
+PURGE = "reservation.purge"
 
 
 @pytest.fixture
@@ -129,6 +130,26 @@ def request(client, e, *, service=CURRENT, token=None, body=None):
         PATH,
         headers=headers,
         json=body if body is not None else {"organization_id": str(e.org), "permission": READ},
+    )
+    assert response.headers["cache-control"] == "no-store"
+    for value in (CURRENT, PREVIOUS, *e.tokens.values()):
+        assert value not in response.text
+    return response
+
+
+def destructive_request(client, e, *, service=CURRENT, token=None, organization_id=None, body=None):
+    headers = {"X-Core-Session": token or e.tokens["operator"]}
+    if service is not None:
+        headers["Authorization"] = "Bearer " + service
+    response = client.post(
+        DESTRUCTIVE_PATH,
+        headers=headers,
+        json=body
+        if body is not None
+        else {
+            "organization_id": str(organization_id or e.org),
+            "operation": PURGE,
+        },
     )
     assert response.headers["cache-control"] == "no-store"
     for value in (CURRENT, PREVIOUS, *e.tokens.values()):
@@ -295,6 +316,153 @@ def test_every_booking_permission_can_be_authorized(identity_session, env, clien
         )
         assert response.status_code == 200
         assert response.json()["permission"] == permission
+
+
+def test_destructive_authorization_allows_platform_admin_without_membership(
+    identity_session, env, clients
+):
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(Membership.id).where(
+                    Membership.organization_id == env.org,
+                    Membership.user_id == env.operator,
+                )
+            )
+            is None
+        )
+    with clients() as client:
+        response = destructive_request(client, env)
+    assert response.status_code == 200
+    assert response.json() == {
+        "allowed": True,
+        "user_id": str(env.operator),
+        "organization_id": str(env.org),
+        "operation": PURGE,
+    }
+
+
+def test_destructive_authorization_denies_tenant_admin_with_all_booking_permissions(
+    identity_session, env, clients
+):
+    grant(identity_session, env)
+    with identity_session.begin():
+        assert BOOKING_PERMISSIONS <= repo.effective_permissions(
+            identity_session, env.org, env.owner
+        )
+    assert "booking.reservations.purge" not in BOOKING_PERMISSIONS
+    with clients() as client:
+        error(
+            destructive_request(client, env, token=env.tokens["owner"]),
+            403,
+            "platform_authority_required",
+        )
+
+
+@pytest.mark.parametrize("entitlement", ["disabled", "missing"])
+def test_destructive_authorization_requires_target_booking_entitlement(
+    identity_session, env, clients, entitlement
+):
+    organization_id = env.org
+    if entitlement == "disabled":
+        platform.set_entitlement(
+            identity_session,
+            actor_id=env.operator,
+            organization_id=env.org,
+            module_code="booking",
+            enabled=False,
+        )
+    else:
+        organization_id = platform.onboard(
+            identity_session,
+            actor_id=env.operator,
+            name="No Booking",
+            slug="no-booking-destructive",
+            owner_email="owner@example.test",
+            enabled_modules=[],
+        )["id"]
+    with clients() as client:
+        error(
+            destructive_request(client, env, organization_id=organization_id),
+            403,
+            "module_disabled",
+        )
+
+
+def test_destructive_authorization_rejects_invalid_service_credential(
+    identity_session, env, clients
+):
+    with clients() as client:
+        error(
+            destructive_request(client, env, service="wrong" * 12),
+            401,
+            "invalid_service_credentials",
+        )
+
+
+@pytest.mark.parametrize("state", ["invalid", "expired"])
+def test_destructive_authorization_rejects_invalid_session(identity_session, env, clients, state):
+    token = "invalid" if state == "invalid" else env.tokens["operator"]
+    if state == "expired":
+        with identity_session.begin():
+            row = identity_session.scalar(
+                select(LoginSession).where(LoginSession.token_digest == token_digest(token))
+            )
+            row.created_at = datetime.now(UTC) - timedelta(days=2)
+            row.expires_at = datetime.now(UTC) - timedelta(days=1)
+    with clients() as client:
+        error(
+            destructive_request(client, env, token=token),
+            401,
+            "invalid_user_session",
+        )
+
+
+def test_destructive_authorization_rejects_archived_organization(identity_session, env, clients):
+    with identity_session.begin():
+        identity_session.get(Organization, env.org).deleted_at = datetime.now(UTC)
+    with clients() as client:
+        error(
+            destructive_request(client, env),
+            404,
+            "organization_not_accessible",
+        )
+
+
+def test_destructive_authorization_rejects_unknown_operation(identity_session, env, clients):
+    with clients() as client:
+        error(
+            destructive_request(
+                client,
+                env,
+                body={
+                    "organization_id": str(env.org),
+                    "operation": "reservation.unknown",
+                },
+            ),
+            422,
+            "invalid_authorization_request",
+        )
+
+
+def test_destructive_authorization_writes_secret_free_platform_audit(
+    identity_session, env, clients
+):
+    with clients() as client:
+        assert destructive_request(client, env).status_code == 200
+    with identity_session.begin():
+        audit = identity_session.scalar(
+            select(PlatformAudit).where(PlatformAudit.action == "booking.destructive.authorized")
+        )
+        assert audit is not None
+        assert audit.actor_id == env.operator
+        assert audit.organization_id == env.org
+        assert audit.target_id == env.org
+        assert audit.before == {}
+        assert audit.after == {"operation": PURGE}
+        serialized = repr({"before": audit.before, "after": audit.after})
+        for secret in (CURRENT, PREVIOUS, *env.tokens.values()):
+            assert secret not in serialized
 
 
 @pytest.mark.parametrize(

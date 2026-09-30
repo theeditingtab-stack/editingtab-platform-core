@@ -24,7 +24,7 @@ from editingtab_core.authorization.policy import AccessError
 from editingtab_core.config import Settings, load_settings
 from editingtab_core.database import build_engine, get_session
 from editingtab_core.internal.booking import (
-    PATH,
+    PATHS,
     AuthorizationFailure,
     BookingRequestGuard,
     failure,
@@ -92,7 +92,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):
-        if request.url.path == PATH:
+        if request.url.path in PATHS:
             return failure(422, "invalid_authorization_request")
         # Never serialize input/errors: validation can contain submitted passwords.
         return JSONResponse(status_code=422, content={"detail": "Invalid request."})
