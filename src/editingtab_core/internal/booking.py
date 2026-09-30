@@ -20,9 +20,16 @@ from editingtab_core.authorization.policy import (
     StorageUnavailable,
 )
 from editingtab_core.authorization.services import authorization_context, transaction
-from editingtab_core.platform.services import require_entitlement
+from editingtab_core.platform.services import (
+    _audit,
+    _require_platform,
+    require_entitlement,
+)
 
 PATH = "/internal/v1/booking/authorize"
+DESTRUCTIVE_PATH = "/internal/v1/booking/authorize-destructive"
+PATHS = frozenset({PATH, DESTRUCTIVE_PATH})
+SUPPORTED_DESTRUCTIVE_OPERATIONS = frozenset({"reservation.purge"})
 router = APIRouter()
 
 
@@ -71,13 +78,13 @@ def trusted_transport(scope, settings):
 
 
 class BookingRequestGuard:
-    """Exact endpoint only. Authenticate service BEFORE body parsing or any DB query."""
+    """Exact internal endpoints only; authenticate service before body or database access."""
 
     def __init__(self, app, settings):
         self.app, self.settings = app, settings
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] != PATH:
+        if scope["type"] != "http" or scope["path"] not in PATHS:
             return await self.app(scope, receive, send)
 
         async def no_store(message):
@@ -132,6 +139,12 @@ class AuthorizationInput(BaseModel):
     permission: str
 
 
+class DestructiveAuthorizationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    organization_id: UUID
+    operation: str
+
+
 def authorize_booking(session, *, token, organization_id, permission):
     if permission not in BOOKING_PERMISSIONS:
         raise AuthorizationFailure(422, "invalid_authorization_request")
@@ -168,6 +181,46 @@ def authorize_booking(session, *, token, organization_id, permission):
         raise AuthorizationFailure(503, "authorization_unavailable") from None
 
 
+def authorize_destructive_booking_operation(session, *, token, organization_id, operation):
+    if operation not in SUPPORTED_DESTRUCTIVE_OPERATIONS:
+        raise AuthorizationFailure(422, "invalid_authorization_request")
+    digest = token_digest(token)
+    if digest is None:
+        raise AuthorizationFailure(401, "invalid_user_session")
+    try:
+        with transaction(session):
+            user = auth_repo.authenticated_user(session, digest)
+            if user is None:
+                raise AuthorizationFailure(401, "invalid_user_session")
+            try:
+                _require_platform(session, user.id)
+            except AccessError:
+                raise AuthorizationFailure(403, "platform_authority_required") from None
+            try:
+                require_entitlement(session, organization_id=organization_id, module_code="booking")
+            except Inaccessible:
+                raise AuthorizationFailure(404, "organization_not_accessible") from None
+            except AccessError:
+                raise AuthorizationFailure(403, "module_disabled") from None
+            _audit(
+                session,
+                actor_id=user.id,
+                organization_id=organization_id,
+                action="booking.destructive.authorized",
+                target_id=organization_id,
+                before={},
+                after={"operation": operation},
+            )
+            return {
+                "allowed": True,
+                "user_id": user.id,
+                "organization_id": organization_id,
+                "operation": operation,
+            }
+    except StorageUnavailable:
+        raise AuthorizationFailure(503, "authorization_unavailable") from None
+
+
 @router.post(PATH)
 def booking_authorize(body: AuthorizationInput, request: Request, session: Database):
     return authorize_booking(
@@ -175,4 +228,16 @@ def booking_authorize(body: AuthorizationInput, request: Request, session: Datab
         token=request.headers.get("x-core-session"),
         organization_id=body.organization_id,
         permission=body.permission,
+    )
+
+
+@router.post(DESTRUCTIVE_PATH)
+def booking_destructive_authorize(
+    body: DestructiveAuthorizationInput, request: Request, session: Database
+):
+    return authorize_destructive_booking_operation(
+        session,
+        token=request.headers.get("x-core-session"),
+        organization_id=body.organization_id,
+        operation=body.operation,
     )
