@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,6 +58,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tenant_router)
     app.include_router(internal_router)
     app.add_middleware(BookingRequestGuard, settings=settings)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.auth_allowed_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type"],
+    )
 
     @app.exception_handler(AuthorizationFailure)
     async def internal_failure(request, error):
