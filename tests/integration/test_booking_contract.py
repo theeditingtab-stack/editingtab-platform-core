@@ -24,6 +24,7 @@ from editingtab_core.authorization.policy import (
     AccessError,
     Conflict,
     Inaccessible,
+    ProtectedRole,
     StorageUnavailable,
 )
 from editingtab_core.identity import services as identity
@@ -530,6 +531,19 @@ def test_provisioning_idempotent_audit_and_no_tenant_delegation(identity_session
             actor_id=env.owner,
             name="Booking reader",
             codes=[READ],
+        )
+
+
+def test_tenant_cannot_unassign_platform_provisioned_booking_administrator(identity_session, env):
+    role_id = grant(identity_session, env)["role_id"]
+    with pytest.raises(ProtectedRole):
+        access.change_assignment(
+            identity_session,
+            organization_id=env.org,
+            actor_id=env.owner,
+            membership_id=env.member,
+            role_id=role_id,
+            remove=True,
         )
 
 

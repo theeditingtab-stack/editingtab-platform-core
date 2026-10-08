@@ -96,8 +96,30 @@ def _custom_role(role):
     return role
 
 
-def _grantable(grant_authority, permissions):
-    if not permissions.keys() <= grant_authority:
+def _tenant_assignable_role(role):
+    # The bootstrap owner role is intentionally assignable by another recovery-capable
+    # administrator. Provisioned roles remain exclusively controlled by trusted platform paths.
+    if role.provisioning_kind is not None:
+        raise ProtectedRole()
+    return role
+
+
+def _authorities(session, organization_id, actor_id):
+    grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+    management_authority = (
+        grant_authority
+        | repo.effective_grant_only_permission_management_authority(
+            session, organization_id, actor_id
+        )
+    )
+    return management_authority, grant_authority
+
+
+def _grantable(management_authority, grant_authority, permissions):
+    if any(
+        code not in (grant_authority if can_grant else management_authority)
+        for code, can_grant in permissions.items()
+    ):
         raise AccessError()
 
 
@@ -239,11 +261,12 @@ def _initial_roles(session, organization_id, actor_id, role_ids):
     if not requested:
         return []
     authorize(session, organization_id, actor_id, ROLE_ASSIGN)
-    grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+    management_authority, grant_authority = _authorities(session, organization_id, actor_id)
     roles = []
     for role_id in requested:
-        role = _role(session, organization_id, role_id)
+        role = _tenant_assignable_role(_role(session, organization_id, role_id))
         _grantable(
+            management_authority,
             grant_authority,
             repo.role_permission_grants(session, organization_id, role_id),
         )
@@ -411,9 +434,9 @@ def list_permission_catalog(session, *, organization_id, actor_id):
 def create_role(session, *, organization_id, actor_id, name, permissions=None, codes=None):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_CREATE, lock=True)
-        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         selected = _permissions(session, permissions if permissions is not None else codes or [])
-        _grantable(grant_authority, selected)
+        _grantable(management_authority, grant_authority, selected)
         display, normalized = role_name(name)
         role = Role(organization_id=organization_id, name=display, normalized_name=normalized)
         session.add(role)
@@ -426,12 +449,12 @@ def create_role(session, *, organization_id, actor_id, name, permissions=None, c
 def update_role(session, *, organization_id, actor_id, role_id, name, permissions=None, codes=None):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
-        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         role = _custom_role(_role(session, organization_id, role_id))
         before = repo.role_permission_grants(session, organization_id, role_id)
         after = _permissions(session, permissions if permissions is not None else codes or [])
-        _grantable(grant_authority, before)
-        _grantable(grant_authority, after)
+        _grantable(management_authority, grant_authority, before)
+        _grantable(management_authority, grant_authority, after)
         role.name, role.normalized_name = role_name(name)
         role.updated_at = datetime.now(UTC)
         repo.replace_permissions(session, organization_id, role_id, after)
@@ -444,9 +467,9 @@ def update_role_metadata(session, *, organization_id, actor_id, role_id, name):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
         role = _custom_role(_role(session, organization_id, role_id))
-        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         permissions = repo.role_permission_grants(session, organization_id, role_id)
-        _grantable(authority, permissions)
+        _grantable(management_authority, grant_authority, permissions)
         role.name, role.normalized_name = role_name(name)
         role.updated_at = datetime.now(UTC)
         repo.audit(
@@ -467,11 +490,12 @@ def change_role_permission(
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_UPDATE, lock=True)
         role = _custom_role(_role(session, organization_id, role_id))
-        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         before = repo.role_permission_grants(session, organization_id, role_id)
         if repo.assignable_permission_codes(session, [code]) != {code}:
             raise InvalidPermission()
-        if code not in authority:
+        required_authority = grant_authority if can_grant and not remove else management_authority
+        if code not in required_authority:
             raise AccessError()
         after = dict(before)
         if remove:
@@ -484,8 +508,8 @@ def change_role_permission(
                 return _role_detail(session, role)
             after[code] = can_grant
             action = "role.permission.granted"
-        _grantable(authority, before)
-        _grantable(authority, after)
+        _grantable(management_authority, grant_authority, before)
+        _grantable(management_authority, grant_authority, after)
         role.updated_at = datetime.now(UTC)
         repo.replace_permissions(session, organization_id, role_id, after)
         ensure_administrator(session, organization_id)
@@ -496,10 +520,10 @@ def change_role_permission(
 def archive_role(session, *, organization_id, actor_id, role_id):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_ARCHIVE, lock=True)
-        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         role = _custom_role(_role(session, organization_id, role_id))
         before = repo.role_permission_grants(session, organization_id, role_id)
-        _grantable(grant_authority, before)
+        _grantable(management_authority, grant_authority, before)
         for assignment in repo.role_assignments(session, organization_id, role_id):
             session.delete(assignment)
             repo.audit(
@@ -520,10 +544,10 @@ def archive_role(session, *, organization_id, actor_id, role_id):
 def restore_role(session, *, organization_id, actor_id, role_id):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_ARCHIVE, lock=True)
-        authority = repo.effective_grant_authority(session, organization_id, actor_id)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         role = _custom_role(_role(session, organization_id, role_id, archived=True))
         permissions = repo.role_permission_grants(session, organization_id, role_id)
-        _grantable(authority, permissions)
+        _grantable(management_authority, grant_authority, permissions)
         if role.deleted_at is None:
             return _role_detail(session, role)
         # Older archived rows may retain dormant assignments. Never reactivate them.
@@ -538,8 +562,8 @@ def restore_role(session, *, organization_id, actor_id, role_id):
 def change_assignment(session, *, organization_id, actor_id, membership_id, role_id, remove=False):
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_ASSIGN, lock=True)
-        grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
-        _role(session, organization_id, role_id, archived=remove)
+        management_authority, grant_authority = _authorities(session, organization_id, actor_id)
+        role = _role(session, organization_id, role_id, archived=remove)
         if (
             session.execute(
                 repo.active_members(organization_id).where(Membership.id == membership_id)
@@ -547,8 +571,9 @@ def change_assignment(session, *, organization_id, actor_id, membership_id, role
             is None
         ):
             raise Inaccessible()
+        _tenant_assignable_role(role)
         permissions = repo.role_permission_grants(session, organization_id, role_id)
-        _grantable(grant_authority, permissions)
+        _grantable(management_authority, grant_authority, permissions)
         assignment = session.get(MembershipRole, (organization_id, membership_id, role_id))
         if remove:
             if assignment is None:
@@ -592,10 +617,14 @@ def before_membership_archive(session, organization, membership, actor_id):
     # Archived organization lifecycle may remove assignments only with an explicit actor;
     # ordinary role authority requires an active organization, so deny that path here.
     authorize(session, organization.id, actor_id, ROLE_ASSIGN)
-    grant_authority = repo.effective_grant_authority(session, organization.id, actor_id)
-    for assignment in assignments:
-        permissions = repo.role_permission_grants(session, organization.id, assignment.role_id)
-        _grantable(grant_authority, permissions)
+    roles = [
+        _tenant_assignable_role(_role(session, organization.id, assignment.role_id, archived=True))
+        for assignment in assignments
+    ]
+    management_authority, grant_authority = _authorities(session, organization.id, actor_id)
+    for assignment, role in zip(assignments, roles, strict=True):
+        permissions = repo.role_permission_grants(session, organization.id, role.id)
+        _grantable(management_authority, grant_authority, permissions)
         session.delete(assignment)
         repo.audit(
             session,
