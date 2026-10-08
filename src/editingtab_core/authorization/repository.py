@@ -8,9 +8,11 @@ from editingtab_core.authorization.models import (
     Role,
     RoleAudit,
     RolePermission,
+    RolePermissionManagement,
 )
 from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS
 from editingtab_core.identity.models import Membership, Organization, User
+from editingtab_core.platform.models import ModuleEntitlement
 
 
 def active_members(organization_id):
@@ -93,6 +95,72 @@ def effective_grant_authority(session, organization_id, actor_id):
     )
 
 
+def grant_only_permission_management_query(organization_id):
+    """Current grant-only scopes, gated by the matching module entitlement."""
+    return (
+        select(RolePermissionManagement.code)
+        .select_from(RolePermissionManagement)
+        .join(
+            Role,
+            and_(
+                Role.id == RolePermissionManagement.role_id,
+                Role.organization_id == RolePermissionManagement.organization_id,
+            ),
+        )
+        .join(
+            MembershipRole,
+            and_(
+                MembershipRole.role_id == Role.id,
+                MembershipRole.organization_id == Role.organization_id,
+            ),
+        )
+        .join(
+            Membership,
+            and_(
+                Membership.id == MembershipRole.membership_id,
+                Membership.organization_id == MembershipRole.organization_id,
+            ),
+        )
+        .join(User, User.id == Membership.user_id)
+        .join(Organization, Organization.id == Membership.organization_id)
+        .join(
+            PermissionDefinition,
+            PermissionDefinition.code == RolePermissionManagement.code,
+        )
+        .join(
+            ModuleEntitlement,
+            and_(
+                ModuleEntitlement.organization_id == RolePermissionManagement.organization_id,
+                ModuleEntitlement.module_code == PermissionDefinition.module,
+            ),
+        )
+        .where(
+            RolePermissionManagement.organization_id == organization_id,
+            Role.provisioning_kind == "booking_permission_manager",
+            Role.deleted_at.is_(None),
+            Membership.deleted_at.is_(None),
+            User.deleted_at.is_(None),
+            User.is_active.is_(True),
+            Organization.deleted_at.is_(None),
+            ModuleEntitlement.enabled.is_(True),
+        )
+    )
+
+
+def effective_grant_only_permission_management_authority(session, organization_id, actor_id):
+    return frozenset(
+        session.scalars(
+            grant_only_permission_management_query(organization_id).where(User.id == actor_id)
+        )
+    )
+
+
+def effective_permission_management_authority(session, organization_id, actor_id):
+    return effective_grant_authority(
+        session, organization_id, actor_id
+    ) | effective_grant_only_permission_management_authority(session, organization_id, actor_id)
+
+
 def assignable_permission_codes(session, codes):
     requested = frozenset(codes)
     if not requested:
@@ -152,6 +220,17 @@ def role_permission_grants(session, organization_id, role_id):
             )
         )
     }
+
+
+def role_permission_management_scopes(session, organization_id, role_id):
+    return frozenset(
+        session.scalars(
+            select(RolePermissionManagement.code).where(
+                RolePermissionManagement.organization_id == organization_id,
+                RolePermissionManagement.role_id == role_id,
+            )
+        )
+    )
 
 
 def membership_roles(session, organization_id, membership_id):

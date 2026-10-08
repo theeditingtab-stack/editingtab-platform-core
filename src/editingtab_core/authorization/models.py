@@ -60,7 +60,8 @@ class Role(Base):
         UniqueConstraint("id", "organization_id", name="uq_core_roles_id_organization"),
         UniqueConstraint("organization_id", "provisioning_kind", name="uq_core_roles_provisioning"),
         CheckConstraint(
-            "provisioning_kind IS NULL OR provisioning_kind = 'booking_inventory'",
+            "provisioning_kind IS NULL OR provisioning_kind IN "
+            "('booking_inventory', 'booking_permission_manager')",
             name="ck_core_roles_provisioning",
         ),
         UniqueConstraint("organization_id", "normalized_name", name="uq_core_roles_name"),
@@ -115,6 +116,47 @@ class RolePermission(Base):
     role_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
     can_grant: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    definition_organization_assignable: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true"
+    )
+    definition_lifecycle: Mapped[str] = mapped_column(
+        String(16), default="active", server_default="active"
+    )
+
+
+class RolePermissionManagement(Base):
+    __tablename__ = "core_role_permission_management"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["role_id", "organization_id"],
+            ["core_roles.id", "core_roles.organization_id"],
+            ondelete="RESTRICT",
+            name="fk_core_role_permission_management_role",
+        ),
+        ForeignKeyConstraint(
+            ["code", "definition_organization_assignable", "definition_lifecycle"],
+            [
+                "core_permission_definitions.code",
+                "core_permission_definitions.organization_assignable",
+                "core_permission_definitions.lifecycle",
+            ],
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+            name="fk_core_role_permission_management_assignable_definition",
+        ),
+        CheckConstraint(
+            "definition_organization_assignable",
+            name="ck_core_role_permission_management_organization_assignable",
+        ),
+        CheckConstraint(
+            "definition_lifecycle = 'active'",
+            name="ck_core_role_permission_management_active",
+        ),
+        Index("ix_core_role_permission_management_code", "organization_id", "code"),
+    )
+    organization_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    role_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
     definition_organization_assignable: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"
     )
