@@ -14,11 +14,12 @@ from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization import repository as authorization_repo
 from editingtab_core.authorization.models import (
+    BookingPermissionManagerDesignation,
+    BookingPermissionManagerScope,
     MembershipRole,
     PermissionDefinition,
     Role,
     RolePermission,
-    RolePermissionManagement,
 )
 from editingtab_core.authorization.policy import BOOKING_PERMISSIONS
 from editingtab_core.identity import services as identity
@@ -170,7 +171,8 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                 )
             ).all()
         ) == dict.fromkeys(BOOKING_PERMISSIONS, False)
-        assert session.scalars(select(RolePermissionManagement)).all() == []
+        assert session.scalars(select(BookingPermissionManagerDesignation)).all() == []
+        assert session.scalars(select(BookingPermissionManagerScope)).all() == []
         assert (
             session.scalar(
                 select(Role.id).where(Role.provisioning_kind == "booking_permission_manager")
@@ -189,7 +191,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0012_booking_permission_mgr"
+    assert expected_head == "0013_booking_manager_scopes"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -231,7 +233,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0012_booking_permission_mgr"
+        == "0013_booking_manager_scopes"
     )
 
 
@@ -239,7 +241,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
 def test_0012_downgrade_rejects_populated_manager_state(
     migration_config, migration_connection, populated_state
 ):
-    command.upgrade(migration_config, "head")
+    command.upgrade(migration_config, "0012_booking_permission_mgr")
     organization_id, role_id = uuid4(), uuid4()
     nested = migration_connection.begin_nested()
     try:
@@ -282,6 +284,116 @@ def test_0012_downgrade_rejects_populated_manager_state(
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         == "0012_booking_permission_mgr"
+    )
+
+
+def test_0013_upgrade_rejects_unmappable_legacy_scopes(migration_config, migration_connection):
+    command.upgrade(migration_config, "0012_booking_permission_mgr")
+    organization_id, role_id = uuid4(), uuid4()
+    nested = migration_connection.begin_nested()
+    try:
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_organizations (id, name, slug) "
+                "VALUES (:id, 'Legacy scope', 'legacy-scope')"
+            ),
+            {"id": organization_id},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_roles "
+                "(id, organization_id, name, normalized_name, provisioning_kind) "
+                "VALUES (:id, :organization_id, 'Legacy manager', "
+                "'legacy manager', 'booking_permission_manager')"
+            ),
+            {"id": role_id, "organization_id": organization_id},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_role_permission_management "
+                "(organization_id, role_id, code) "
+                "VALUES (:organization_id, :role_id, 'booking.inventory.read')"
+            ),
+            {"organization_id": organization_id, "role_id": role_id},
+        )
+        with pytest.raises(CommandError, match="Database migration failed"):
+            command.upgrade(migration_config, "head")
+    finally:
+        nested.rollback()
+    assert (
+        migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0012_booking_permission_mgr"
+    )
+    assert "core_role_permission_management" in inspect(migration_connection).get_table_names()
+
+
+@pytest.mark.parametrize("populated_state", ["designation", "scope"])
+def test_0013_downgrade_rejects_populated_designation_state(
+    migration_config, migration_connection, populated_state
+):
+    command.upgrade(migration_config, "head")
+    organization_id, user_id, membership_id, role_id = uuid4(), uuid4(), uuid4(), uuid4()
+    nested = migration_connection.begin_nested()
+    try:
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_organizations (id, name, slug) "
+                "VALUES (:id, 'Designation guard', :slug)"
+            ),
+            {"id": organization_id, "slug": f"designation-{populated_state}"},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_users "
+                "(id, email, normalized_email, display_name) "
+                "VALUES (:id, :email, :email, 'Downgrade user')"
+            ),
+            {"id": user_id, "email": f"{populated_state}@example.test"},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_memberships (id, organization_id, user_id) "
+                "VALUES (:id, :organization_id, :user_id)"
+            ),
+            {"id": membership_id, "organization_id": organization_id, "user_id": user_id},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_roles "
+                "(id, organization_id, name, normalized_name, provisioning_kind) "
+                "VALUES (:id, :organization_id, 'Downgrade manager', "
+                "'downgrade manager', 'booking_permission_manager')"
+            ),
+            {"id": role_id, "organization_id": organization_id},
+        )
+        migration_connection.execute(
+            text(
+                "INSERT INTO core_booking_permission_manager_designations "
+                "(organization_id, membership_id, role_id) "
+                "VALUES (:organization_id, :membership_id, :role_id)"
+            ),
+            {
+                "organization_id": organization_id,
+                "membership_id": membership_id,
+                "role_id": role_id,
+            },
+        )
+        if populated_state == "scope":
+            migration_connection.execute(
+                text(
+                    "INSERT INTO core_booking_permission_manager_scopes "
+                    "(organization_id, membership_id, code) "
+                    "VALUES (:organization_id, :membership_id, 'booking.inventory.read')"
+                ),
+                {"organization_id": organization_id, "membership_id": membership_id},
+            )
+        with pytest.raises(CommandError, match="Database migration failed"):
+            command.downgrade(migration_config, "0012_booking_permission_mgr")
+    finally:
+        nested.rollback()
+    assert (
+        migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        == "0013_booking_manager_scopes"
     )
 
 

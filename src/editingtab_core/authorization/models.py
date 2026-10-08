@@ -124,14 +124,46 @@ class RolePermission(Base):
     )
 
 
-class RolePermissionManagement(Base):
-    __tablename__ = "core_role_permission_management"
+class BookingPermissionManagerDesignation(Base):
+    __tablename__ = "core_booking_permission_manager_designations"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["membership_id", "organization_id"],
+            ["core_memberships.id", "core_memberships.organization_id"],
+            ondelete="RESTRICT",
+            name="fk_core_booking_manager_designation_membership",
+        ),
         ForeignKeyConstraint(
             ["role_id", "organization_id"],
             ["core_roles.id", "core_roles.organization_id"],
             ondelete="RESTRICT",
-            name="fk_core_role_permission_management_role",
+            name="fk_core_booking_manager_designation_role",
+        ),
+        Index("ix_core_booking_manager_designations_role", "organization_id", "role_id"),
+    )
+    organization_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    membership_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    role_id: Mapped[UUID] = mapped_column(Uuid)
+    designated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BookingPermissionManagerScope(Base):
+    __tablename__ = "core_booking_permission_manager_scopes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["organization_id", "membership_id"],
+            [
+                "core_booking_permission_manager_designations.organization_id",
+                "core_booking_permission_manager_designations.membership_id",
+            ],
+            ondelete="RESTRICT",
+            name="fk_core_booking_manager_scope_designation",
         ),
         ForeignKeyConstraint(
             ["code", "definition_organization_assignable", "definition_lifecycle"],
@@ -142,20 +174,21 @@ class RolePermissionManagement(Base):
             ],
             ondelete="RESTRICT",
             onupdate="RESTRICT",
-            name="fk_core_role_permission_management_assignable_definition",
+            name="fk_core_booking_manager_scope_assignable_definition",
         ),
         CheckConstraint(
             "definition_organization_assignable",
-            name="ck_core_role_permission_management_organization_assignable",
+            name="ck_core_booking_manager_scope_organization_assignable",
         ),
         CheckConstraint(
             "definition_lifecycle = 'active'",
-            name="ck_core_role_permission_management_active",
+            name="ck_core_booking_manager_scope_active",
         ),
-        Index("ix_core_role_permission_management_code", "organization_id", "code"),
+        CheckConstraint("code LIKE 'booking.%'", name="ck_core_booking_manager_scope_booking"),
+        Index("ix_core_booking_manager_scopes_code", "organization_id", "code"),
     )
     organization_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
-    role_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    membership_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
     definition_organization_assignable: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true"

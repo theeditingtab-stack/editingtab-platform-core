@@ -3,12 +3,13 @@
 from sqlalchemy import and_, delete, select
 
 from editingtab_core.authorization.models import (
+    BookingPermissionManagerDesignation,
+    BookingPermissionManagerScope,
     MembershipRole,
     PermissionDefinition,
     Role,
     RoleAudit,
     RolePermission,
-    RolePermissionManagement,
 )
 from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS
 from editingtab_core.identity.models import Membership, Organization, User
@@ -96,15 +97,24 @@ def effective_grant_authority(session, organization_id, actor_id):
 
 
 def grant_only_permission_management_query(organization_id):
-    """Current grant-only scopes, gated by the matching module entitlement."""
+    """Active membership-scoped authority, gated by assignment and entitlement."""
     return (
-        select(RolePermissionManagement.code)
-        .select_from(RolePermissionManagement)
+        select(BookingPermissionManagerScope.code)
+        .select_from(BookingPermissionManagerScope)
+        .join(
+            BookingPermissionManagerDesignation,
+            and_(
+                BookingPermissionManagerDesignation.organization_id
+                == BookingPermissionManagerScope.organization_id,
+                BookingPermissionManagerDesignation.membership_id
+                == BookingPermissionManagerScope.membership_id,
+            ),
+        )
         .join(
             Role,
             and_(
-                Role.id == RolePermissionManagement.role_id,
-                Role.organization_id == RolePermissionManagement.organization_id,
+                Role.id == BookingPermissionManagerDesignation.role_id,
+                Role.organization_id == BookingPermissionManagerDesignation.organization_id,
             ),
         )
         .join(
@@ -112,6 +122,7 @@ def grant_only_permission_management_query(organization_id):
             and_(
                 MembershipRole.role_id == Role.id,
                 MembershipRole.organization_id == Role.organization_id,
+                MembershipRole.membership_id == BookingPermissionManagerDesignation.membership_id,
             ),
         )
         .join(
@@ -125,17 +136,18 @@ def grant_only_permission_management_query(organization_id):
         .join(Organization, Organization.id == Membership.organization_id)
         .join(
             PermissionDefinition,
-            PermissionDefinition.code == RolePermissionManagement.code,
+            PermissionDefinition.code == BookingPermissionManagerScope.code,
         )
         .join(
             ModuleEntitlement,
             and_(
-                ModuleEntitlement.organization_id == RolePermissionManagement.organization_id,
+                ModuleEntitlement.organization_id == BookingPermissionManagerScope.organization_id,
                 ModuleEntitlement.module_code == PermissionDefinition.module,
             ),
         )
         .where(
-            RolePermissionManagement.organization_id == organization_id,
+            BookingPermissionManagerScope.organization_id == organization_id,
+            BookingPermissionManagerDesignation.revoked_at.is_(None),
             Role.provisioning_kind == "booking_permission_manager",
             Role.deleted_at.is_(None),
             Membership.deleted_at.is_(None),
@@ -222,12 +234,12 @@ def role_permission_grants(session, organization_id, role_id):
     }
 
 
-def role_permission_management_scopes(session, organization_id, role_id):
+def booking_permission_manager_scopes(session, organization_id, membership_id):
     return frozenset(
         session.scalars(
-            select(RolePermissionManagement.code).where(
-                RolePermissionManagement.organization_id == organization_id,
-                RolePermissionManagement.role_id == role_id,
+            select(BookingPermissionManagerScope.code).where(
+                BookingPermissionManagerScope.organization_id == organization_id,
+                BookingPermissionManagerScope.membership_id == membership_id,
             )
         )
     )

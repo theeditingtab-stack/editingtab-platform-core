@@ -2,14 +2,16 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from editingtab_core.authorization import repository
 from editingtab_core.authorization import services as access
 from editingtab_core.authorization.models import (
+    BookingPermissionManagerDesignation,
+    BookingPermissionManagerScope,
     MembershipRole,
     Role,
     RolePermission,
-    RolePermissionManagement,
 )
 from editingtab_core.authorization.policy import (
     MEMBER_MANAGE,
@@ -30,6 +32,7 @@ pytestmark = pytest.mark.integration
 
 MANAGED = "booking.inventory.read"
 FULL_GRANT = "booking.inventory.manage"
+ALTERNATE = "booking.reservations.read"
 CORE_PERMISSION = "core.organization.read"
 ROLE_OPERATIONS = {ROLE_CREATE, ROLE_UPDATE, ROLE_ARCHIVE, ROLE_ASSIGN, MEMBER_MANAGE}
 
@@ -69,9 +72,14 @@ def management_env(identity_session):
         identity_session.flush()
         identity_session.add_all(
             [
-                RolePermissionManagement(
+                BookingPermissionManagerDesignation(
                     organization_id=organization_id,
+                    membership_id=membership_id,
                     role_id=manager_role.id,
+                ),
+                BookingPermissionManagerScope(
+                    organization_id=organization_id,
+                    membership_id=membership_id,
                     code=MANAGED,
                 ),
                 MembershipRole(
@@ -179,8 +187,8 @@ def test_grant_only_scope_is_exact_and_never_operational_or_full_grant(
 ):
     env = management_env
     with identity_session.begin():
-        assert repository.role_permission_management_scopes(
-            identity_session, env.organization_id, env.manager_role_id
+        assert repository.booking_permission_manager_scopes(
+            identity_session, env.organization_id, env.membership_id
         ) == {MANAGED}
         assert (
             repository.effective_permissions(identity_session, env.organization_id, env.user_id)
@@ -232,6 +240,156 @@ def test_effective_management_authority_unions_existing_full_grants(
         assert repository.effective_permission_management_authority(
             identity_session, env.organization_id, env.user_id
         ) == {MANAGED, FULL_GRANT}
+
+
+def test_two_managers_have_independent_scope_sets_and_updates(identity_session, management_env):
+    env = management_env
+    second_user_id = identity.create_user(
+        identity_session, email="second-manager@example.test", display_name="Second Manager"
+    )
+    second_membership_id = identity.add_membership(
+        identity_session, organization_id=env.organization_id, user_id=second_user_id
+    )
+    with identity_session.begin():
+        identity_session.add_all(
+            [
+                BookingPermissionManagerDesignation(
+                    organization_id=env.organization_id,
+                    membership_id=second_membership_id,
+                    role_id=env.manager_role_id,
+                ),
+                BookingPermissionManagerScope(
+                    organization_id=env.organization_id,
+                    membership_id=second_membership_id,
+                    code=FULL_GRANT,
+                ),
+                MembershipRole(
+                    organization_id=env.organization_id,
+                    membership_id=second_membership_id,
+                    role_id=env.manager_role_id,
+                ),
+            ]
+        )
+    with identity_session.begin():
+        assert repository.effective_grant_only_permission_management_authority(
+            identity_session, env.organization_id, env.user_id
+        ) == {MANAGED}
+        assert repository.effective_grant_only_permission_management_authority(
+            identity_session, env.organization_id, second_user_id
+        ) == {FULL_GRANT}
+        identity_session.delete(
+            identity_session.get(
+                BookingPermissionManagerScope,
+                (env.organization_id, env.membership_id, MANAGED),
+            )
+        )
+        identity_session.add(
+            BookingPermissionManagerScope(
+                organization_id=env.organization_id,
+                membership_id=env.membership_id,
+                code=ALTERNATE,
+            )
+        )
+    with identity_session.begin():
+        assert repository.booking_permission_manager_scopes(
+            identity_session, env.organization_id, env.membership_id
+        ) == {ALTERNATE}
+        assert repository.effective_grant_only_permission_management_authority(
+            identity_session, env.organization_id, env.user_id
+        ) == {ALTERNATE}
+        assert repository.effective_grant_only_permission_management_authority(
+            identity_session, env.organization_id, second_user_id
+        ) == {FULL_GRANT}
+
+
+def test_revoked_designation_and_stale_assignment_give_no_authority(
+    identity_session, management_env
+):
+    env = management_env
+    with identity_session.begin():
+        designation = identity_session.get(
+            BookingPermissionManagerDesignation,
+            (env.organization_id, env.membership_id),
+        )
+        designation.revoked_at = datetime.now(UTC)
+    with identity_session.begin():
+        assert (
+            identity_session.get(
+                MembershipRole,
+                (env.organization_id, env.membership_id, env.manager_role_id),
+            )
+            is not None
+        )
+        assert repository.booking_permission_manager_scopes(
+            identity_session, env.organization_id, env.membership_id
+        ) == {MANAGED}
+        assert (
+            repository.effective_grant_only_permission_management_authority(
+                identity_session, env.organization_id, env.user_id
+            )
+            == frozenset()
+        )
+
+
+def test_designation_without_protected_role_assignment_gives_no_authority(
+    identity_session, management_env
+):
+    env = management_env
+    with identity_session.begin():
+        identity_session.delete(
+            identity_session.get(
+                MembershipRole,
+                (env.organization_id, env.membership_id, env.manager_role_id),
+            )
+        )
+    with identity_session.begin():
+        assert (
+            repository.effective_grant_only_permission_management_authority(
+                identity_session, env.organization_id, env.user_id
+            )
+            == frozenset()
+        )
+
+
+def test_stale_protected_role_assignment_without_designation_gives_no_authority(
+    identity_session, management_env
+):
+    env = management_env
+    other_user_id = identity.create_user(
+        identity_session, email="assignment-only@example.test", display_name="Assignment Only"
+    )
+    other_membership_id = identity.add_membership(
+        identity_session, organization_id=env.organization_id, user_id=other_user_id
+    )
+    with identity_session.begin():
+        identity_session.add(
+            MembershipRole(
+                organization_id=env.organization_id,
+                membership_id=other_membership_id,
+                role_id=env.manager_role_id,
+            )
+        )
+    with identity_session.begin():
+        assert (
+            repository.effective_grant_only_permission_management_authority(
+                identity_session, env.organization_id, other_user_id
+            )
+            == frozenset()
+        )
+
+
+def test_scope_database_rejects_non_booking_and_unknown_codes(identity_session, management_env):
+    env = management_env
+    for code in (CORE_PERMISSION, "booking.future.read"):
+        with pytest.raises(IntegrityError), identity_session.begin():
+            identity_session.add(
+                BookingPermissionManagerScope(
+                    organization_id=env.organization_id,
+                    membership_id=env.membership_id,
+                    code=code,
+                )
+            )
+            identity_session.flush()
 
 
 @pytest.mark.parametrize("state", ["role", "inactive_user", "user", "membership", "organization"])
@@ -286,9 +444,14 @@ def test_foreign_organization_scope_does_not_leak(identity_session, management_e
         identity_session.flush()
         identity_session.add_all(
             [
-                RolePermissionManagement(
+                BookingPermissionManagerDesignation(
                     organization_id=foreign_organization_id,
+                    membership_id=foreign_membership_id,
                     role_id=foreign_role.id,
+                ),
+                BookingPermissionManagerScope(
+                    organization_id=foreign_organization_id,
+                    membership_id=foreign_membership_id,
                     code=FULL_GRANT,
                 ),
                 MembershipRole(
@@ -311,8 +474,8 @@ def test_foreign_organization_scope_does_not_leak(identity_session, management_e
             identity_session, foreign_organization_id, env.user_id
         ) == {FULL_GRANT}
         assert (
-            repository.role_permission_management_scopes(
-                identity_session, env.organization_id, foreign_role.id
+            repository.booking_permission_manager_scopes(
+                identity_session, env.organization_id, foreign_membership_id
             )
             == frozenset()
         )
