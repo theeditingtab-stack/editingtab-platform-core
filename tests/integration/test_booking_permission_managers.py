@@ -22,7 +22,7 @@ from editingtab_core.authorization.models import (
     RolePermission,
 )
 from editingtab_core.authorization.policy import (
-    ADMINISTRATOR_PERMISSIONS,
+    COMPANY_ADMINISTRATOR_PERMISSIONS,
     AccessError,
     Inaccessible,
     InvalidPermission,
@@ -94,7 +94,7 @@ def manager_env(identity_session, integration_settings):
                         code=code,
                         can_grant=False,
                     )
-                    for code in ADMINISTRATOR_PERMISSIONS
+                    for code in COMPANY_ADMINISTRATOR_PERMISSIONS
                 ),
                 MembershipRole(
                     organization_id=organization_id,
@@ -585,3 +585,61 @@ def test_http_contract_and_tenant_denial(identity_session, manager_env, manager_
             client.put(path, json={"scopes": [READ]}, headers={"Origin": ORIGIN}).status_code == 403
         )
         assert client.delete(path, headers={"Origin": ORIGIN}).status_code == 403
+
+
+def test_authenticated_context_combines_company_admin_and_scoped_management_authority(
+    identity_session, manager_env, manager_clients
+):
+    env = manager_env
+    designate(identity_session, env, scopes=(READ,))
+
+    def organization_context(email):
+        with manager_clients(email) as client:
+            response = client.get("/auth/context")
+        assert response.status_code == 200
+        return next(
+            (
+                organization
+                for organization in response.json()["organizations"]
+                if organization["organization_id"] == str(env.organization_id)
+            ),
+            None,
+        )
+
+    owner = organization_context("manager-owner@example.test")
+    assert owner is not None
+    assert READ not in owner["effective_permissions"]
+    assert READ not in owner["effective_grant_authority"]
+    assert READ in owner["effective_permission_management_authority"]
+    assert MANAGE in owner["effective_permission_management_authority"]
+
+    unprivileged = organization_context("manager-unprivileged@example.test")
+    assert unprivileged is not None
+    assert unprivileged["effective_permission_management_authority"] == []
+
+    managers.revoke(
+        identity_session,
+        actor_id=env.operator,
+        organization_id=env.organization_id,
+        membership_id=env.owner_membership,
+    )
+    revoked = organization_context("manager-owner@example.test")
+    assert revoked is not None
+    assert READ in revoked["effective_permission_management_authority"]
+    assert MANAGE in revoked["effective_permission_management_authority"]
+
+    designate(identity_session, env, scopes=(READ,))
+    with identity_session.begin():
+        identity_session.get(ModuleEntitlement, (env.organization_id, "booking")).enabled = False
+    disabled = organization_context("manager-owner@example.test")
+    assert disabled is not None
+    assert not any(
+        code.startswith("booking.")
+        for code in disabled["effective_permission_management_authority"]
+    )
+    assert READ not in disabled["effective_permission_management_authority"]
+
+    with identity_session.begin():
+        identity_session.get(ModuleEntitlement, (env.organization_id, "booking")).enabled = True
+        identity_session.get(Membership, env.owner_membership).deleted_at = datetime.now(UTC)
+    assert organization_context("manager-owner@example.test") is None

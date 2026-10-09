@@ -47,6 +47,7 @@ class ContextOrganization(BaseModel):
     roles: list[ContextRole]
     effective_permissions: list[str]
     effective_grant_authority: list[str]
+    effective_permission_management_authority: list[str]
     enabled_modules: list[str]
 
 

@@ -105,9 +105,17 @@ It then consumes these organization-scoped endpoints:
 - `DELETE /organizations/{org}/members/{membership}/roles/{role}`
 
 `effective_permissions` answers what the current identity may do. `effective_grant_authority`
-answers which permissions that identity may delegate. The frontend must keep these concepts
-separate. Core checks both independently, prevents grants beyond `can_grant`, keeps platform
-authority separate, and returns no effective access for disabled or archived identities.
+answers which permissions that identity may delegate with `can_grant=true`.
+`effective_permission_management_authority` answers which exact permissions the identity may add
+to or remove from roles. It includes ordinary grant authority, current grant-only Booking
+Permission Manager scopes, and the enabled organization permission catalog for a member who holds
+the complete company-administration permission set (`core.members.read` plus all role-management
+operations). This lets owners delegate ordinary company administration through a custom role
+without a platform grant. The frontend must keep these concepts separate: use permission-
+management authority for Grant/Revoke availability, and require grant authority separately before
+offering `can_grant=true`. Core checks both independently, filters the catalog and mutations by
+current module entitlement, prevents grants beyond `can_grant`, keeps platform authority separate,
+and returns no effective access for disabled or archived identities.
 
 Responses can legitimately change between rendering and mutation. The frontend must handle
 Core's current `401`, `403`, `404`, and `409` responses and refresh `/auth/context` plus relevant

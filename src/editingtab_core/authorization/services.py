@@ -106,11 +106,8 @@ def _tenant_assignable_role(role):
 
 def _authorities(session, organization_id, actor_id):
     grant_authority = repo.effective_grant_authority(session, organization_id, actor_id)
-    management_authority = (
-        grant_authority
-        | repo.effective_grant_only_permission_management_authority(
-            session, organization_id, actor_id
-        )
+    management_authority = repo.effective_permission_management_authority(
+        session, organization_id, actor_id
     )
     return management_authority, grant_authority
 
@@ -123,7 +120,7 @@ def _grantable(management_authority, grant_authority, permissions):
         raise AccessError()
 
 
-def _permissions(session, values):
+def _permissions(session, organization_id, values):
     if isinstance(values, dict):
         invalid = any(
             not isinstance(code, str) or type(can_grant) is not bool
@@ -137,7 +134,7 @@ def _permissions(session, values):
         if any(not isinstance(code, str) for code in items) or len(items) != len(set(items)):
             raise InvalidPermission()
         result = dict.fromkeys(items, False)
-    if repo.assignable_permission_codes(session, result) != frozenset(result):
+    if not frozenset(result) <= repo.eligible_permission_codes(session, organization_id):
         raise InvalidPermission()
     return result
 
@@ -427,7 +424,7 @@ def list_permission_catalog(session, *, organization_id, actor_id):
                 "description": definition.description,
                 "lifecycle": definition.lifecycle,
             }
-            for definition in repo.permission_catalog(session)
+            for definition in repo.permission_catalog(session, organization_id)
         ]
 
 
@@ -435,7 +432,9 @@ def create_role(session, *, organization_id, actor_id, name, permissions=None, c
     with transaction(session):
         authorize(session, organization_id, actor_id, ROLE_CREATE, lock=True)
         management_authority, grant_authority = _authorities(session, organization_id, actor_id)
-        selected = _permissions(session, permissions if permissions is not None else codes or [])
+        selected = _permissions(
+            session, organization_id, permissions if permissions is not None else codes or []
+        )
         _grantable(management_authority, grant_authority, selected)
         display, normalized = role_name(name)
         role = Role(organization_id=organization_id, name=display, normalized_name=normalized)
@@ -452,7 +451,9 @@ def update_role(session, *, organization_id, actor_id, role_id, name, permission
         management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         role = _custom_role(_role(session, organization_id, role_id))
         before = repo.role_permission_grants(session, organization_id, role_id)
-        after = _permissions(session, permissions if permissions is not None else codes or [])
+        after = _permissions(
+            session, organization_id, permissions if permissions is not None else codes or []
+        )
         _grantable(management_authority, grant_authority, before)
         _grantable(management_authority, grant_authority, after)
         role.name, role.normalized_name = role_name(name)
@@ -492,7 +493,7 @@ def change_role_permission(
         role = _custom_role(_role(session, organization_id, role_id))
         management_authority, grant_authority = _authorities(session, organization_id, actor_id)
         before = repo.role_permission_grants(session, organization_id, role_id)
-        if repo.assignable_permission_codes(session, [code]) != {code}:
+        if code not in repo.eligible_permission_codes(session, organization_id):
             raise InvalidPermission()
         required_authority = grant_authority if can_grant and not remove else management_authority
         if code not in required_authority:

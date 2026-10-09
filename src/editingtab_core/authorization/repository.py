@@ -1,6 +1,6 @@
 """Scoped queries and mutations only; callers own transactions and organization locks."""
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, or_, select
 
 from editingtab_core.authorization.models import (
     BookingPermissionManagerDesignation,
@@ -11,7 +11,10 @@ from editingtab_core.authorization.models import (
     RoleAudit,
     RolePermission,
 )
-from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS
+from editingtab_core.authorization.policy import (
+    ADMINISTRATOR_PERMISSIONS,
+    COMPANY_ADMINISTRATOR_PERMISSIONS,
+)
 from editingtab_core.identity.models import Membership, Organization, User
 from editingtab_core.platform.models import ModuleEntitlement
 
@@ -87,13 +90,14 @@ def effective_permissions(session, organization_id, actor_id):
 
 
 def effective_grant_authority(session, organization_id, actor_id):
-    return frozenset(
+    granted = frozenset(
         session.scalars(
             permission_query(organization_id).where(
                 User.id == actor_id, RolePermission.can_grant.is_(True)
             )
         )
     )
+    return granted & eligible_permission_codes(session, organization_id)
 
 
 def grant_only_permission_management_query(organization_id):
@@ -168,9 +172,14 @@ def effective_grant_only_permission_management_authority(session, organization_i
 
 
 def effective_permission_management_authority(session, organization_id, actor_id):
-    return effective_grant_authority(
+    authority = effective_grant_authority(
         session, organization_id, actor_id
     ) | effective_grant_only_permission_management_authority(session, organization_id, actor_id)
+    if COMPANY_ADMINISTRATOR_PERMISSIONS <= effective_permissions(
+        session, organization_id, actor_id
+    ):
+        authority |= eligible_permission_codes(session, organization_id)
+    return authority
 
 
 def assignable_permission_codes(session, codes):
@@ -189,25 +198,55 @@ def assignable_permission_codes(session, codes):
     return found
 
 
-def permission_catalog(session):
-    return session.scalars(
+def eligible_permission_query(organization_id):
+    """Assignable Core and currently entitled module permissions for one tenant."""
+    return (
         select(PermissionDefinition)
+        .outerjoin(
+            ModuleEntitlement,
+            and_(
+                ModuleEntitlement.organization_id == organization_id,
+                ModuleEntitlement.module_code == PermissionDefinition.module,
+            ),
+        )
         .where(
             PermissionDefinition.organization_assignable.is_(True),
             PermissionDefinition.lifecycle == "active",
+            or_(
+                PermissionDefinition.module == "core",
+                ModuleEntitlement.enabled.is_(True),
+            ),
         )
-        .order_by(PermissionDefinition.module, PermissionDefinition.code)
+    )
+
+
+def eligible_permission_codes(session, organization_id):
+    return frozenset(
+        session.scalars(
+            eligible_permission_query(organization_id).with_only_columns(PermissionDefinition.code)
+        )
+    )
+
+
+def permission_catalog(session, organization_id):
+    return session.scalars(
+        eligible_permission_query(organization_id).order_by(
+            PermissionDefinition.module, PermissionDefinition.code
+        )
     )
 
 
 def has_administrator(session, organization_id):
     user_ids = session.scalars(active_members(organization_id).with_only_columns(User.id)).all()
     for user_id in user_ids:
-        if ADMINISTRATOR_PERMISSIONS <= effective_permissions(
-            session, organization_id, user_id
-        ) and ADMINISTRATOR_PERMISSIONS <= effective_grant_authority(
-            session, organization_id, user_id
-        ):
+        permissions = effective_permissions(session, organization_id, user_id)
+        is_company_administrator = COMPANY_ADMINISTRATOR_PERMISSIONS <= permissions
+        is_legacy_administrator = (
+            ADMINISTRATOR_PERMISSIONS <= permissions
+            and ADMINISTRATOR_PERMISSIONS
+            <= effective_grant_authority(session, organization_id, user_id)
+        )
+        if is_company_administrator or is_legacy_administrator:
             return True
     return False
 

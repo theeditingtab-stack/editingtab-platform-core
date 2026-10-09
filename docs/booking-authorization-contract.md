@@ -148,7 +148,8 @@ permission use from grant authority.
 
 `GET /auth/context` is informational UX context. It exposes a current-state snapshot so a trusted
 frontend can shape navigation, but its role names, permission list, grant-authority list, enabled
-module list, and selected organization ID are never authorization evidence.
+module list, permission-management-authority list, and selected organization ID are never
+authorization evidence.
 
 `POST /internal/v1/booking/authorize` is the authoritative service decision. It independently
 revalidates the service, session, active user, active tenant relationship, one exact permission,

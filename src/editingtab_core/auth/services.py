@@ -153,6 +153,11 @@ def access_context(session: Session, token: str | None):
                             session, organization.id, user.id
                         )
                     ),
+                    "effective_permission_management_authority": sorted(
+                        authorization_repository.effective_permission_management_authority(
+                            session, organization.id, user.id
+                        )
+                    ),
                     "enabled_modules": repository.enabled_modules(
                         session, organization.id, SUPPORTED_MODULES
                     ),

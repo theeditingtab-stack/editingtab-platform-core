@@ -22,6 +22,7 @@ read-only snapshot assembled from current Core database state:
       "roles": [{"role_id": "uuid", "role_name": "Reader"}],
       "effective_permissions": ["core.organization.read"],
       "effective_grant_authority": [],
+      "effective_permission_management_authority": [],
       "enabled_modules": ["booking"]
     }
   ]
@@ -29,7 +30,8 @@ read-only snapshot assembled from current Core database state:
 ```
 
 Organizations are ordered by public slug and ID; roles by name and ID; permissions, grant
-authority, and modules lexically. Only active memberships in active organizations are returned.
+authority, permission-management authority, and modules lexically. Only active memberships in
+active organizations are returned.
 Only active assigned roles contribute. User inactivity/deletion, session expiry/revocation,
 membership archival, organization archival, role archival, permission changes, grant-authority
 changes, and entitlement changes are read on the next request. There are no permission claims in
@@ -51,8 +53,14 @@ context only to shape navigation and explain available actions.
 
 Role names are descriptive. Frontends should use the flattened effective permission list for
 display decisions rather than infer capability from a role name. Effective grant authority is a
-separate list because holding a permission does not necessarily permit delegating it. Neither
-list supplied back by a client is authorization evidence.
+separate list because holding a permission does not necessarily permit delegating it.
+`effective_permission_management_authority` answers which exact permission codes the user may add
+to or remove from roles. It includes ordinary grant authority, current grant-only Booking
+Permission Manager scopes, and—when the member currently holds the complete company-administration
+permission set—the active assignable Core catalog plus the catalog of each enabled module. This
+does not imply operational use of those permissions or authority to set `can_grant=true`. Module
+entitlement and membership changes affect the next request without a restart. None of these lists
+supplied back by a client is authorization evidence.
 
 Enabled modules come from Core's existing entitlement records. Only currently enabled,
 implemented modules are included; at this checkpoint that means `booking`. No POS, Unified Inbox,

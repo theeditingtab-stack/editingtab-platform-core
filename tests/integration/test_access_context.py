@@ -223,6 +223,10 @@ def test_context_is_stable_scoped_and_contains_only_effective_current_state(clie
             "booking.inventory.manage",
             "core.organization.read",
         ],
+        "effective_permission_management_authority": [
+            "booking.inventory.manage",
+            "core.organization.read",
+        ],
         "enabled_modules": ["booking"],
     }
     assert zebra == {
@@ -233,6 +237,7 @@ def test_context_is_stable_scoped_and_contains_only_effective_current_state(clie
         "roles": [],
         "effective_permissions": [],
         "effective_grant_authority": [],
+        "effective_permission_management_authority": [],
         "enabled_modules": [],
     }
     serialized = first.text.lower()
@@ -267,6 +272,7 @@ def test_role_archive_and_entitlement_revocation_are_immediate(
     ]
     assert alpha["effective_permissions"] == ["core.members.read"]
     assert alpha["effective_grant_authority"] == []
+    assert alpha["effective_permission_management_authority"] == []
     assert alpha["enabled_modules"] == []
 
 

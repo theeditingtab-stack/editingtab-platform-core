@@ -14,14 +14,18 @@ from sqlalchemy.orm import sessionmaker
 from editingtab_core.app import create_app
 from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import Passwords
+from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization import services as tenant
 from editingtab_core.authorization.http import Actor, Database
 from editingtab_core.authorization.models import MembershipRole, Role, RoleAudit, RolePermission
 from editingtab_core.authorization.policy import (
+    BOOKING_PERMISSIONS,
+    COMPANY_ADMINISTRATOR_PERMISSIONS,
     OWNER_PERMISSIONS,
     AccessError,
     Conflict,
     Inaccessible,
+    InvalidPermission,
     StorageUnavailable,
 )
 from editingtab_core.identity import services as identity
@@ -152,6 +156,162 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
     # Platform authority is not membership and cannot access tenant APIs.
     with pytest.raises(Inaccessible):
         tenant.read_organization(identity_session, organization_id=org, actor_id=setup.operator)
+
+
+def test_onboarded_owner_can_delegate_company_administration_without_platform_grants(
+    identity_session, setup, clients
+):
+    org = onboard(identity_session, setup)["id"]
+    worker_membership = identity.add_membership(
+        identity_session, organization_id=org, user_id=setup.ordinary
+    )
+
+    with identity_session.begin():
+        owner_authority = authorization_repository.effective_permission_management_authority(
+            identity_session, org, setup.owner
+        )
+        assert BOOKING_PERMISSIONS <= owner_authority
+        assert OWNER_PERMISSIONS <= owner_authority
+        assert not authorization_repository.effective_grant_only_permission_management_authority(
+            identity_session, org, setup.owner
+        )
+    with clients("owner@example.test") as owner_client:
+        context = owner_client.get("/auth/context")
+        assert context.status_code == 200
+        organization = next(
+            item for item in context.json()["organizations"] if item["organization_id"] == str(org)
+        )
+        assert BOOKING_PERMISSIONS <= set(organization["effective_permission_management_authority"])
+
+    receptionist = tenant.create_role(
+        identity_session,
+        organization_id=org,
+        actor_id=setup.owner,
+        name="Receptionist",
+        permissions={
+            "booking.reservations.create": False,
+            "booking.reservations.read": False,
+        },
+    )
+    tenant.change_assignment(
+        identity_session,
+        organization_id=org,
+        actor_id=setup.owner,
+        membership_id=worker_membership,
+        role_id=receptionist["id"],
+    )
+    with identity_session.begin():
+        assert authorization_repository.effective_permissions(
+            identity_session, org, setup.ordinary
+        ) == {"booking.reservations.create", "booking.reservations.read"}
+        assert (
+            authorization_repository.effective_permission_management_authority(
+                identity_session, org, setup.ordinary
+            )
+            == frozenset()
+        )
+
+    with pytest.raises(AccessError):
+        tenant.create_role(
+            identity_session,
+            organization_id=org,
+            actor_id=setup.ordinary,
+            name="Worker escalation",
+            permissions={"booking.settings.manage": False},
+        )
+    with pytest.raises(Inaccessible):
+        tenant.list_roles(identity_session, organization_id=org, actor_id=setup.operator)
+
+    permission_manager = tenant.create_role(
+        identity_session,
+        organization_id=org,
+        actor_id=setup.owner,
+        name="Permission manager",
+        permissions=dict.fromkeys(COMPANY_ADMINISTRATOR_PERMISSIONS, False),
+    )
+    tenant.change_assignment(
+        identity_session,
+        organization_id=org,
+        actor_id=setup.owner,
+        membership_id=worker_membership,
+        role_id=permission_manager["id"],
+    )
+
+    with identity_session.begin():
+        delegated_authority = authorization_repository.effective_permission_management_authority(
+            identity_session, org, setup.ordinary
+        )
+        assert BOOKING_PERMISSIONS <= delegated_authority
+        assert OWNER_PERMISSIONS <= delegated_authority
+        assert not authorization_repository.effective_grant_only_permission_management_authority(
+            identity_session, org, setup.ordinary
+        )
+
+    other = onboard(identity_session, setup, slug="other-company")["id"]
+    with pytest.raises(Inaccessible):
+        tenant.list_permission_catalog(
+            identity_session, organization_id=other, actor_id=setup.ordinary
+        )
+
+    delegated = tenant.create_role(
+        identity_session,
+        organization_id=org,
+        actor_id=setup.ordinary,
+        name="Front desk supervisor",
+        permissions={"booking.settings.read": False},
+    )
+    assert delegated["permissions"] == [{"code": "booking.settings.read", "can_grant": False}]
+    with pytest.raises(AccessError):
+        tenant.change_role_permission(
+            identity_session,
+            organization_id=org,
+            actor_id=setup.ordinary,
+            role_id=delegated["id"],
+            code="booking.settings.read",
+            can_grant=True,
+        )
+
+    services.set_entitlement(
+        identity_session,
+        actor_id=setup.operator,
+        organization_id=org,
+        module_code="booking",
+        enabled=False,
+    )
+    with identity_session.begin():
+        assert not (
+            BOOKING_PERMISSIONS
+            & authorization_repository.effective_permission_management_authority(
+                identity_session, org, setup.owner
+            )
+        )
+    with pytest.raises(InvalidPermission):
+        tenant.create_role(
+            identity_session,
+            organization_id=org,
+            actor_id=setup.owner,
+            name="Disabled module role",
+            permissions={"booking.inventory.read": False},
+        )
+    services.set_entitlement(
+        identity_session,
+        actor_id=setup.operator,
+        organization_id=org,
+        module_code="booking",
+        enabled=True,
+    )
+    with identity_session.begin():
+        assert BOOKING_PERMISSIONS <= (
+            authorization_repository.effective_permission_management_authority(
+                identity_session, org, setup.ordinary
+            )
+        )
+        audited_actions = set(
+            identity_session.scalars(
+                select(RoleAudit.action).where(RoleAudit.organization_id == org)
+            )
+        )
+        assert {"role.created", "assignment.added"} <= audited_actions
 
 
 def test_default_no_modules_duplicate_slug_and_archived_slug_preserved(identity_session, setup):

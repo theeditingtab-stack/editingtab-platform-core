@@ -18,7 +18,10 @@ from editingtab_core.auth.security import AuthenticationError, Passwords
 from editingtab_core.authorization import repository, services
 from editingtab_core.authorization.bootstrap import bootstrap
 from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
-from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS, LastAdministrator
+from editingtab_core.authorization.policy import (
+    COMPANY_ADMINISTRATOR_PERMISSIONS,
+    LastAdministrator,
+)
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Membership
 from editingtab_core.platform import booking_permission_managers as manager_lifecycle
@@ -368,7 +371,7 @@ def test_concurrent_manager_scope_replacement_and_revocation_remain_consistent(
                             code=code,
                             can_grant=False,
                         )
-                        for code in ADMINISTRATOR_PERMISSIONS
+                        for code in COMPANY_ADMINISTRATOR_PERMISSIONS
                     ),
                     MembershipRole(
                         organization_id=organization,

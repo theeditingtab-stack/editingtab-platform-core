@@ -12,7 +12,7 @@ from editingtab_core.authorization.models import (
     Role,
 )
 from editingtab_core.authorization.policy import (
-    ADMINISTRATOR_PERMISSIONS,
+    COMPANY_ADMINISTRATOR_PERMISSIONS,
     AccessError,
     Conflict,
     Inaccessible,
@@ -165,7 +165,7 @@ def designate(session, *, actor_id, organization_id, membership_id, scopes):
         _organization(session, organization_id, lock=True)
         require_entitlement(session, organization_id=organization_id, module_code=MODULE)
         membership, user = _member(session, organization_id, membership_id, lock=True)
-        if not ADMINISTRATOR_PERMISSIONS <= repo.effective_permissions(
+        if not COMPANY_ADMINISTRATOR_PERMISSIONS <= repo.effective_permissions(
             session, organization_id, user.id
         ):
             raise AccessError()

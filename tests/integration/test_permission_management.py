@@ -481,7 +481,7 @@ def test_foreign_organization_scope_does_not_leak(identity_session, management_e
         )
 
 
-def test_disabled_entitlement_suspends_only_manager_derived_authority(
+def test_disabled_entitlement_suspends_all_module_management_authority(
     identity_session, management_env
 ):
     env = management_env
@@ -516,12 +516,16 @@ def test_disabled_entitlement_suspends_only_manager_derived_authority(
             )
             == frozenset()
         )
-        assert repository.effective_grant_authority(
-            identity_session, env.organization_id, env.user_id
-        ) == {FULL_GRANT}
-        assert repository.effective_permission_management_authority(
-            identity_session, env.organization_id, env.user_id
-        ) == {FULL_GRANT}
+        assert (
+            repository.effective_grant_authority(identity_session, env.organization_id, env.user_id)
+            == frozenset()
+        )
+        assert (
+            repository.effective_permission_management_authority(
+                identity_session, env.organization_id, env.user_id
+            )
+            == frozenset()
+        )
 
 
 def test_manager_can_assign_and_revoke_use_only_booking_permission(

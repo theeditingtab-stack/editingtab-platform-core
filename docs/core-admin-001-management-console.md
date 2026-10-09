@@ -104,8 +104,16 @@ or reservation permanent purge.
 The future admin frontend should begin with `GET /auth/context`, select an organization returned
 there, and use effective permissions only to shape navigation and controls. It should fetch role
 and employee detail after selection, use the permission registry for labels, and keep
-`effective_grant_authority` separate when deciding which permission or role options to present.
+`effective_grant_authority` separate from `effective_permission_management_authority` when
+deciding whether to offer grant-authority escalation or ordinary permission management.
 The backend must still be allowed to return `403`, `404`, or `409` after any stale UI snapshot.
+
+The initial organization owner can create and assign a company-administrator role containing
+`core.members.read` and the complete role-management operation set. An active member holding that
+set may manage the active assignable Core permissions and permissions belonging to modules that
+are currently enabled for the organization. This company authority is computed from current data;
+it neither creates platform authority nor enables a module, and it does not permit setting
+`can_grant=true` without separately delegated grant authority.
 
 Use invitation creation for a new email identity; use direct member linking only when the UI was
 given an existing Core user ID by a trusted workflow. Do not create passwords in an organization

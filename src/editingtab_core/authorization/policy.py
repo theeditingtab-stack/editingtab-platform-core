@@ -34,6 +34,7 @@ MEMBER_MANAGE = "core.members.manage"
 ADMINISTRATOR_PERMISSIONS = frozenset(
     {"core.roles.read", ROLE_CREATE, ROLE_UPDATE, ROLE_ARCHIVE, ROLE_ASSIGN}
 )
+COMPANY_ADMINISTRATOR_PERMISSIONS = ADMINISTRATOR_PERMISSIONS | {"core.members.read"}
 
 
 class AccessError(Exception):

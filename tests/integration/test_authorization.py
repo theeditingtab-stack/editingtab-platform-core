@@ -38,6 +38,7 @@ from editingtab_core.authorization.policy import (
 )
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Membership, Organization, User
+from editingtab_core.platform.models import ModuleEntitlement
 
 pytestmark = pytest.mark.integration
 ORIGIN = "http://127.0.0.1:18080"
@@ -205,6 +206,19 @@ def test_permission_catalog_is_protected_deterministic_and_tenant_scoped(
     )
     assert all(row["lifecycle"] == "active" for row in expected)
     assert all(row["module"] != "platform" for row in expected)
+    assert {row["module"] for row in expected} == {"core"}
+
+    with identity_session.begin():
+        identity_session.add(
+            ModuleEntitlement(
+                organization_id=setup.org,
+                module_code="booking",
+                enabled=True,
+            )
+        )
+    expected = access.list_permission_catalog(
+        identity_session, organization_id=setup.org, actor_id=setup.owner
+    )
     assert "booking.reservations.cancel" in {row["code"] for row in expected}
 
     other = bootstrap(

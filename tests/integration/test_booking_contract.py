@@ -499,7 +499,7 @@ def test_database_failure_is_unavailable_not_denial_or_allow(identity_session, e
         error(request(client, env), 503, "authorization_unavailable")
 
 
-def test_provisioning_idempotent_audit_and_no_tenant_delegation(identity_session, env):
+def test_provisioning_idempotent_audit_and_bounded_tenant_delegation(identity_session, env):
     result = grant(identity_session, env)
     with identity_session.begin():
         audit = identity_session.scalar(
@@ -524,13 +524,21 @@ def test_provisioning_idempotent_audit_and_no_tenant_delegation(identity_session
     with identity_session.begin():
         assert READ in repo.effective_permissions(identity_session, env.org, env.owner)
         assert READ not in repo.effective_grant_authority(identity_session, env.org, env.owner)
+    role = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Booking reader",
+        codes=[READ],
+    )
+    assert role["permissions"] == [{"code": READ, "can_grant": False}]
     with pytest.raises(AccessError):
         access.create_role(
             identity_session,
             organization_id=env.org,
             actor_id=env.owner,
-            name="Booking reader",
-            codes=[READ],
+            name="Booking grant administrator",
+            permissions={READ: True},
         )
 
 
