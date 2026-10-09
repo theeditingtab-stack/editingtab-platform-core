@@ -245,6 +245,23 @@ def booking_permission_manager_scopes(session, organization_id, membership_id):
     )
 
 
+def replace_booking_permission_manager_scopes(session, organization_id, membership_id, codes):
+    session.execute(
+        delete(BookingPermissionManagerScope).where(
+            BookingPermissionManagerScope.organization_id == organization_id,
+            BookingPermissionManagerScope.membership_id == membership_id,
+        )
+    )
+    session.add_all(
+        BookingPermissionManagerScope(
+            organization_id=organization_id,
+            membership_id=membership_id,
+            code=code,
+        )
+        for code in sorted(codes)
+    )
+
+
 def membership_roles(session, organization_id, membership_id):
     return list(
         session.scalars(

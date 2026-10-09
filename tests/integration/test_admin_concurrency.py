@@ -17,10 +17,13 @@ from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import AuthenticationError, Passwords
 from editingtab_core.authorization import repository, services
 from editingtab_core.authorization.bootstrap import bootstrap
-from editingtab_core.authorization.models import Role
-from editingtab_core.authorization.policy import LastAdministrator
+from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
+from editingtab_core.authorization.policy import ADMINISTRATOR_PERMISSIONS, LastAdministrator
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Membership
+from editingtab_core.platform import booking_permission_managers as manager_lifecycle
+from editingtab_core.platform import services as platform_services
+from editingtab_core.platform.models import ModuleEntitlement
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
@@ -328,6 +331,146 @@ def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
             )
             is True
         )
+
+
+def test_concurrent_manager_scope_replacement_and_revocation_remain_consistent(
+    integration_engine, shared_schema
+):
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        operator = identity.create_user(
+            session, email="manager-operator@example.test", display_name="Operator"
+        )
+        manager = identity.create_user(
+            session, email="concurrent-manager@example.test", display_name="Manager"
+        )
+        platform_services.bootstrap_initial(session, email="manager-operator@example.test")
+        organization = identity.create_organization(
+            session, name="Concurrent managers", slug="concurrent-managers"
+        )
+        membership = identity.add_membership(session, organization_id=organization, user_id=manager)
+        with session.begin():
+            operations = Role(
+                organization_id=organization,
+                name="Concurrent role operations",
+                normalized_name="concurrent role operations",
+            )
+            session.add(operations)
+            session.flush()
+            session.add_all(
+                [
+                    *(
+                        RolePermission(
+                            organization_id=organization,
+                            role_id=operations.id,
+                            code=code,
+                            can_grant=False,
+                        )
+                        for code in ADMINISTRATOR_PERMISSIONS
+                    ),
+                    MembershipRole(
+                        organization_id=organization,
+                        membership_id=membership,
+                        role_id=operations.id,
+                    ),
+                    ModuleEntitlement(
+                        organization_id=organization,
+                        module_code="booking",
+                        enabled=True,
+                    ),
+                ]
+            )
+        manager_lifecycle.designate(
+            session,
+            actor_id=operator,
+            organization_id=organization,
+            membership_id=membership,
+            scopes=["booking.inventory.read"],
+        )
+
+    pids = Queue()
+
+    def replace_scopes():
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pids.put(connection.scalar(text("SELECT pg_backend_pid()")))
+            connection.commit()
+            with Session(connection) as session:
+                manager_lifecycle.designate(
+                    session,
+                    actor_id=operator,
+                    organization_id=organization,
+                    membership_id=membership,
+                    scopes=["booking.inventory.manage"],
+                )
+
+    def revoke():
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pids.put(connection.scalar(text("SELECT pg_backend_pid()")))
+            connection.commit()
+            with Session(connection) as session:
+                manager_lifecycle.revoke(
+                    session,
+                    actor_id=operator,
+                    organization_id=organization,
+                    membership_id=membership,
+                )
+
+    with scoped_connection(integration_engine, shared_schema) as gate:
+        gate.execute(
+            text("SELECT id FROM core_organizations WHERE id = :id FOR UPDATE"),
+            {"id": organization},
+        )
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(replace_scopes), workers.submit(revoke)]
+            try:
+                worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
+                deadline = time.monotonic() + 2
+                with integration_engine.connect() as observer:
+                    while True:
+                        waiting = [
+                            observer.scalar(
+                                text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                {"pid": pid},
+                            )
+                            for pid in worker_pids
+                        ]
+                        if all(waiting):
+                            break
+                        assert time.monotonic() < deadline, (
+                            "Manager workers did not reach the organization lock"
+                        )
+                        time.sleep(0.01)
+            finally:
+                gate.rollback()
+            for future in futures:
+                future.result(timeout=5)
+
+    with (
+        scoped_connection(integration_engine, shared_schema) as connection,
+        Session(connection) as session,
+    ):
+        rows = manager_lifecycle.list_managers(
+            session, actor_id=operator, organization_id=organization
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assignment = session.get(
+            MembershipRole,
+            (organization, membership, row["role_id"]),
+        )
+        authority = repository.effective_grant_only_permission_management_authority(
+            session, organization, manager
+        )
+        if row["state"] == "active":
+            assert row["scopes"] == ["booking.inventory.manage"]
+            assert assignment is not None
+            assert authority == {"booking.inventory.manage"}
+        else:
+            assert row["state"] == "revoked"
+            assert assignment is None
+            assert authority == frozenset()
 
 
 def test_concurrent_invitation_acceptance_creates_one_account_and_membership(

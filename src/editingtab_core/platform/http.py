@@ -1,9 +1,10 @@
 """Explicit platform routes; tenant module reads retain tenant authorization."""
 
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from fastapi import APIRouter, Response
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
 
 from editingtab_core.authorization.http import Actor, Database, Limit, Offset
 from editingtab_core.platform import services
@@ -48,6 +49,30 @@ class BookingProvisionOutput(BaseModel):
     membership_id: UUID
     role_id: UUID
     permissions: list[str]
+
+
+PermissionCode = Annotated[StrictStr, Field(min_length=1, max_length=64)]
+
+
+class BookingPermissionManagerInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scopes: list[PermissionCode] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def unique_scopes(self):
+        if len(self.scopes) != len(set(self.scopes)):
+            raise ValueError("duplicate scope code")
+        return self
+
+
+class BookingPermissionManagerOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    organization_id: UUID
+    membership_id: UUID
+    user_id: UUID
+    role_id: UUID
+    state: Literal["active", "revoked"]
+    scopes: list[str]
 
 
 @router.get("/organizations", response_model=list[PlatformOrganizationOutput])
@@ -114,3 +139,53 @@ def booking_administrator(
         organization_id=organization_id,
         membership_id=body.membership_id,
     )
+
+
+@router.get(
+    "/organizations/{organization_id}/booking-permission-managers",
+    response_model=list[BookingPermissionManagerOutput],
+)
+def booking_permission_managers(organization_id: UUID, session: Database, actor_id: Actor):
+    from editingtab_core.platform.booking_permission_managers import list_managers
+
+    return list_managers(session, actor_id=actor_id, organization_id=organization_id)
+
+
+@router.put(
+    "/organizations/{organization_id}/booking-permission-managers/{membership_id}",
+    response_model=BookingPermissionManagerOutput,
+)
+def update_booking_permission_manager(
+    organization_id: UUID,
+    membership_id: UUID,
+    body: BookingPermissionManagerInput,
+    session: Database,
+    actor_id: Actor,
+):
+    from editingtab_core.platform.booking_permission_managers import designate
+
+    return designate(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        membership_id=membership_id,
+        scopes=body.scopes,
+    )
+
+
+@router.delete(
+    "/organizations/{organization_id}/booking-permission-managers/{membership_id}",
+    status_code=204,
+)
+def delete_booking_permission_manager(
+    organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor
+):
+    from editingtab_core.platform.booking_permission_managers import revoke
+
+    revoke(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        membership_id=membership_id,
+    )
+    return Response(status_code=204)
