@@ -48,16 +48,25 @@ def env(identity_session, integration_settings):
     s = identity_session
     passwords = Passwords()
     ids = {}
+    emails = {}
     for name in ("operator", "owner", "ordinary"):
+        emails[name] = (
+            platform.PLATFORM_ADMIN_EMAIL if name == "operator" else f"{name}@example.test"
+        )
         ids[name] = provision_user(
             s,
             settings=integration_settings,
             passwords=passwords,
-            email=f"{name}@example.test",
+            email=emails[name],
             display_name=name,
             password=PASSWORD,
         )
-    platform.bootstrap_initial(s, email="operator@example.test")
+    platform.bootstrap_initial(
+        s,
+        passwords=passwords,
+        password=PASSWORD,
+        display_name="Platform Administrator",
+    )
     org = platform.onboard(
         s,
         actor_id=ids["operator"],
@@ -78,7 +87,7 @@ def env(identity_session, integration_settings):
             s,
             settings=integration_settings,
             passwords=passwords,
-            email=f"{name}@example.test",
+            email=emails[name],
             password=PASSWORD,
             source="127.0.0.1",
         )

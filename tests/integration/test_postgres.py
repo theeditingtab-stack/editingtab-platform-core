@@ -68,7 +68,15 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
     command.upgrade(migration_config, "0003_password_sessions")
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         org_id = identity.create_organization(session, name="Preserved", slug="preserved")
-        member_id = identity.add_membership(session, organization_id=org_id, user_id=existing_id)
+        member_id = uuid4()
+        with session.begin():
+            session.execute(
+                text(
+                    "INSERT INTO core_memberships (id, organization_id, user_id) "
+                    "VALUES (:id, :organization_id, :user_id)"
+                ),
+                {"id": member_id, "organization_id": org_id, "user_id": existing_id},
+            )
         with session.begin():
             session.add(
                 PasswordCredential(
@@ -191,7 +199,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0013_booking_manager_scopes"
+    assert expected_head == "0014_company_user_management"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -233,7 +241,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0013_booking_manager_scopes"
+        == "0014_company_user_management"
     )
 
 
@@ -393,7 +401,7 @@ def test_0013_downgrade_rejects_populated_designation_state(
         nested.rollback()
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0013_booking_manager_scopes"
+        == "0014_company_user_management"
     )
 
 

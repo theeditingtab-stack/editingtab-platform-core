@@ -59,6 +59,7 @@ def _member(session, organization_id, membership_id, *, lock=False):
             Membership.id == membership_id,
             Membership.organization_id == organization_id,
             Membership.deleted_at.is_(None),
+            Membership.is_active.is_(True),
             User.deleted_at.is_(None),
             User.is_active.is_(True),
         )

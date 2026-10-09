@@ -27,6 +27,7 @@ def active_members(organization_id):
         .where(
             Membership.organization_id == organization_id,
             Membership.deleted_at.is_(None),
+            Membership.is_active.is_(True),
             Organization.deleted_at.is_(None),
             User.deleted_at.is_(None),
             User.is_active.is_(True),
@@ -78,6 +79,7 @@ def permission_query(organization_id):
             RolePermission.organization_id == organization_id,
             Role.deleted_at.is_(None),
             Membership.deleted_at.is_(None),
+            Membership.is_active.is_(True),
             User.deleted_at.is_(None),
             User.is_active.is_(True),
             Organization.deleted_at.is_(None),
@@ -155,6 +157,7 @@ def grant_only_permission_management_query(organization_id):
             Role.provisioning_kind == "booking_permission_manager",
             Role.deleted_at.is_(None),
             Membership.deleted_at.is_(None),
+            Membership.is_active.is_(True),
             User.deleted_at.is_(None),
             User.is_active.is_(True),
             Organization.deleted_at.is_(None),

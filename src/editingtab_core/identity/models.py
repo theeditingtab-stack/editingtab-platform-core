@@ -72,9 +72,15 @@ class Membership(_Record, Base):
         ),
         Index("ix_core_memberships_user_id", "user_id"),
         UniqueConstraint("id", "organization_id", name="uq_core_memberships_id_organization"),
+        CheckConstraint(
+            "display_name IS NULL OR char_length(btrim(display_name)) > 0",
+            name="ck_core_memberships_display_name",
+        ),
     )
 
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("core_organizations.id", ondelete="RESTRICT")
     )
     user_id: Mapped[UUID] = mapped_column(ForeignKey("core_users.id", ondelete="RESTRICT"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    display_name: Mapped[str | None] = mapped_column(String(200))

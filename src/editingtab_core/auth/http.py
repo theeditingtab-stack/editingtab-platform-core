@@ -165,7 +165,10 @@ def create_invitation(
         role_ids=body.role_ids,
     )
     token = result.pop("token")
-    if request.app.state.settings.environment != "production":
+    if (
+        request.app.state.settings.environment in {"development", "test"}
+        and "environment" in request.app.state.settings.model_fields_set
+    ):
         result["development_token"] = token
     return result
 

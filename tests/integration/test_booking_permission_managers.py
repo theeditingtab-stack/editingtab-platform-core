@@ -52,11 +52,20 @@ def manager_env(identity_session, integration_settings):
             identity_session,
             settings=integration_settings,
             passwords=passwords,
-            email=f"manager-{name}@example.test",
+            email=(
+                platform.PLATFORM_ADMIN_EMAIL
+                if name == "operator"
+                else f"manager-{name}@example.test"
+            ),
             display_name=name.title(),
             password=PASSWORD,
         )
-    platform.bootstrap_initial(identity_session, email="manager-operator@example.test")
+    platform.bootstrap_initial(
+        identity_session,
+        passwords=passwords,
+        password=PASSWORD,
+        display_name="Platform Administrator",
+    )
     organization_id = platform.onboard(
         identity_session,
         actor_id=users["operator"],
@@ -116,7 +125,7 @@ def manager_env(identity_session, integration_settings):
 @pytest.fixture
 def manager_clients(migration_connection, integration_settings):
     @contextmanager
-    def make(email="manager-operator@example.test"):
+    def make(email=platform.PLATFORM_ADMIN_EMAIL):
         app = create_app(
             integration_settings.model_copy(update={"auth_allowed_origins": (ORIGIN,)})
         )

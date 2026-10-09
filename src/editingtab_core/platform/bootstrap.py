@@ -1,36 +1,52 @@
 """Interactive operator command; never called by startup, migrations, or HTTP."""
 
+import getpass
 import sys
 
 from sqlalchemy.orm import Session
 
 from editingtab_core.auth.provision import SafeParser
+from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization.policy import AccessError
 from editingtab_core.config import load_settings
 from editingtab_core.database import build_engine
-from editingtab_core.platform.services import BootstrapClosed, bootstrap_initial
+from editingtab_core.platform.services import (
+    PLATFORM_ADMIN_EMAIL,
+    BootstrapClosed,
+    bootstrap_initial,
+)
 
 CONFIRMATION = "GRANT INITIAL PLATFORM ADMIN"
 
 
 def main():
-    parser = SafeParser(description="One-time operator bootstrap for an existing active user.")
-    parser.add_argument("--email", required=True)
-    args = parser.parse_args()
+    parser = SafeParser(description="One-time designated platform administrator bootstrap.")
+    parser.parse_args()
     engine = None
+    password = None
+    confirmation = None
     try:
         if not sys.stdin.isatty():
             print("Interactive operator confirmation required.", file=sys.stderr)
             return 1
         settings = load_settings()
-        print("This grants separate platform authority to the explicitly selected user.")
-        print("Confirm the target email supplied in --email before continuing.")
+        print(f"This creates or grants separate platform authority to {PLATFORM_ADMIN_EMAIL}.")
         if input(f"Type {CONFIRMATION}: ") != CONFIRMATION:
             print("Not confirmed; nothing changed.")
             return 1
+        password = getpass.getpass("Initial administrator password: ")
+        confirmation = getpass.getpass("Confirm initial administrator password: ")
+        if password != confirmation:
+            print("Passwords did not match; nothing changed.", file=sys.stderr)
+            return 1
         engine = build_engine(settings)
         with Session(engine, expire_on_commit=False) as session:
-            bootstrap_initial(session, email=args.email)
+            bootstrap_initial(
+                session,
+                passwords=Passwords(),
+                password=password,
+                display_name="The Editing Tab Platform Administrator",
+            )
         print("Initial platform administrator granted. Operator bootstrap is now closed.")
         return 0
     except BootstrapClosed:
@@ -49,6 +65,8 @@ def main():
         print("Not confirmed; nothing changed.", file=sys.stderr)
         return 1
     finally:
+        password = None
+        confirmation = None
         if engine is not None:
             engine.dispose()
 

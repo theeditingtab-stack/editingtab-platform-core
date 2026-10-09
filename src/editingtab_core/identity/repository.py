@@ -54,6 +54,7 @@ def _active_memberships(organization_id: UUID):
         .where(
             Membership.organization_id == organization_id,
             Membership.deleted_at.is_(None),
+            Membership.is_active.is_(True),
             Organization.deleted_at.is_(None),
             User.deleted_at.is_(None),
             User.is_active.is_(True),
@@ -111,7 +112,13 @@ def _membership_including_archived(
 
 
 def create_membership(session: Session, *, organization_id: UUID, user_id: UUID) -> Membership:
-    membership = Membership(organization_id=organization_id, user_id=user_id)
+    user = session.get(User, user_id)
+    membership = Membership(
+        organization_id=organization_id,
+        user_id=user_id,
+        is_active=True,
+        display_name=user.display_name if user is not None else None,
+    )
     session.add(membership)
     session.flush()
     return membership

@@ -118,6 +118,16 @@ class MemberRestoreInput(BaseModel):
         return self
 
 
+class MemberUpdateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str = Field(min_length=1, max_length=200)
+
+
+class MemberStateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active: StrictBool
+
+
 class RoleMetadataInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=100)
@@ -177,6 +187,40 @@ def archive_member(organization_id: UUID, membership_id: UUID, session: Database
         membership_id=membership_id,
     )
     return Response(status_code=204)
+
+
+@router.patch("/{organization_id}/members/{membership_id}", response_model=MemberOutput)
+def update_member(
+    organization_id: UUID,
+    membership_id: UUID,
+    body: MemberUpdateInput,
+    session: Database,
+    actor_id: Actor,
+):
+    return services.update_member(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+        display_name=body.display_name,
+    )
+
+
+@router.put("/{organization_id}/members/{membership_id}/activation", response_model=MemberOutput)
+def update_member_activation(
+    organization_id: UUID,
+    membership_id: UUID,
+    body: MemberStateInput,
+    session: Database,
+    actor_id: Actor,
+):
+    return services.set_member_active(
+        session,
+        organization_id=organization_id,
+        actor_id=actor_id,
+        membership_id=membership_id,
+        active=body.active,
+    )
 
 
 @router.post("/{organization_id}/members/{membership_id}/restore", response_model=MemberOutput)

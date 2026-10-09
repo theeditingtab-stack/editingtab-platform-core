@@ -73,6 +73,7 @@ def active_organization_memberships(session: Session, user_id: UUID):
             .where(
                 Membership.user_id == user_id,
                 Membership.deleted_at.is_(None),
+                Membership.is_active.is_(True),
                 Organization.deleted_at.is_(None),
             )
             .order_by(Organization.slug, Organization.id)

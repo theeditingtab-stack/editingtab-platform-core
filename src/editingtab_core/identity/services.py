@@ -106,6 +106,7 @@ def add_membership(session: Session, *, organization_id: UUID, user_id: UUID) ->
         elif membership.deleted_at is not None:
             before_membership_restore(session, organization_id, membership.id)
             membership.deleted_at = None
+            membership.is_active = True
             session.flush()
         result = membership.id
     return result

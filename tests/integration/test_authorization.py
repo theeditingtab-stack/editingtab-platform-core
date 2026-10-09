@@ -119,6 +119,63 @@ def create(session, env, name, codes):
     )["id"]
 
 
+def test_company_employee_profile_activation_and_last_admin_safeguard(identity_session, setup):
+    access.change_assignment(
+        identity_session,
+        organization_id=setup.org,
+        actor_id=setup.owner,
+        membership_id=setup.member,
+        role_id=setup.owner_role,
+    )
+    updated = access.update_member(
+        identity_session,
+        organization_id=setup.org,
+        actor_id=setup.owner,
+        membership_id=setup.member,
+        display_name="Company-specific Member",
+    )
+    assert updated["display_name"] == "Company-specific Member"
+    with identity_session.begin():
+        assert identity_session.get(User, setup.user).display_name == "Member"
+
+    inactive = access.set_member_active(
+        identity_session,
+        organization_id=setup.org,
+        actor_id=setup.owner,
+        membership_id=setup.member,
+        active=False,
+    )
+    assert inactive["state"] == "inactive"
+    with pytest.raises(Inaccessible):
+        access.read_organization(identity_session, organization_id=setup.org, actor_id=setup.user)
+    restored = access.set_member_active(
+        identity_session,
+        organization_id=setup.org,
+        actor_id=setup.owner,
+        membership_id=setup.member,
+        active=True,
+    )
+    assert restored["state"] == "active"
+    assert {role["id"] for role in restored["roles"]} == {setup.owner_role}
+
+    access.set_member_active(
+        identity_session,
+        organization_id=setup.org,
+        actor_id=setup.owner,
+        membership_id=setup.member,
+        active=False,
+    )
+
+    with pytest.raises(LastAdministrator):
+        access.set_member_active(
+            identity_session,
+            organization_id=setup.org,
+            actor_id=setup.owner,
+            membership_id=setup.owner_member,
+            active=False,
+        )
+
+
 def assign(session, env, role, member=None):
     access.change_assignment(
         session,

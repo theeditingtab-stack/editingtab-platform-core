@@ -4,7 +4,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from editingtab_core.auth import repository as auth_repository
 from editingtab_core.auth.models import PasswordCredential
+from editingtab_core.auth.security import Passwords, validate_password
 from editingtab_core.authorization.onboarding import _create_owned_organization
 from editingtab_core.authorization.policy import (
     AccessError,
@@ -25,6 +27,7 @@ from editingtab_core.platform.models import (
 
 MODULE_CATALOG = frozenset({"booking", "pos", "unified_inbox", "chatbot"})
 SUPPORTED_MODULES = frozenset({"booking"})
+PLATFORM_ADMIN_EMAIL = "editingtab.dev@gmail.com"
 
 
 class OrganizationConflict(Conflict):
@@ -82,8 +85,9 @@ def _require_platform(session, actor_id):
         raise AccessError()
 
 
-def bootstrap_initial(session, *, email):
-    """Operator-only entry point. CLI requires confirmation; never exposed over HTTP."""
+def bootstrap_initial(session, *, passwords: Passwords, password: str, display_name: str):
+    """Create the designated administrator once; repeat calls never change credentials."""
+    email = PLATFORM_ADMIN_EMAIL
     try:
         _, normalized = normalize_email(email)
     except InvalidIdentity:
@@ -97,20 +101,59 @@ def bootstrap_initial(session, *, email):
         )
         if state is None:
             raise StorageUnavailable()
-        if state.completed_at is not None or session.scalar(select(PlatformAdminGrant.id).limit(1)):
-            raise BootstrapClosed()
-        user_id = session.scalar(
-            select(User.id)
-            .where(
-                User.normalized_email == normalized,
-                User.is_active.is_(True),
-                User.deleted_at.is_(None),
-            )
+        existing_user = session.scalar(
+            select(User)
+            .where(User.normalized_email == normalized)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
-        if user_id is None:
+        existing_grant = session.scalar(
+            select(PlatformAdminGrant)
+            .join(User)
+            .where(User.normalized_email == normalized)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        any_grant = session.scalar(select(PlatformAdminGrant.id).limit(1))
+        if state.completed_at is not None:
+            if (
+                existing_user is not None
+                and existing_user.is_active
+                and existing_user.deleted_at is None
+                and existing_grant is not None
+                and existing_grant.revoked_at is None
+            ):
+                return existing_grant.id
+            raise BootstrapClosed()
+        if any_grant is not None:
+            raise BootstrapClosed()
+        if existing_user is not None and (
+            not existing_user.is_active or existing_user.deleted_at is not None
+        ):
             raise InvalidOnboarding()
-        grant = PlatformAdminGrant(user_id=user_id)
+        if existing_user is None:
+            validate_password(password)
+            try:
+                name = clean_name(display_name)
+            except InvalidIdentity:
+                raise InvalidOnboarding() from None
+            existing_user = User(
+                email=normalized,
+                normalized_email=normalized,
+                display_name=name,
+            )
+            session.add(existing_user)
+            session.flush()
+        credential = session.get(PasswordCredential, existing_user.id, with_for_update=True)
+        if credential is None:
+            validate_password(password)
+            session.add(
+                PasswordCredential(
+                    user_id=existing_user.id,
+                    password_hash=passwords.hash(password),
+                )
+            )
+        grant = PlatformAdminGrant(user_id=existing_user.id)
         session.add(grant)
         session.flush()
         state.completed_at = datetime.now(UTC)
@@ -121,7 +164,66 @@ def bootstrap_initial(session, *, email):
             action="operator.bootstrap",
             target_id=grant.id,
             before={},
-            after={"user_id": str(user_id), "active": True},
+            after={"user_id": str(existing_user.id), "active": True},
+        )
+        return grant.id
+
+
+def recover_platform_admin(session, *, passwords: Passwords, password: str):
+    """Explicit operator recovery; never used by startup or tenant-facing HTTP."""
+    validate_password(password)
+    _, normalized = normalize_email(PLATFORM_ADMIN_EMAIL)
+    with transaction(session):
+        state = session.scalar(
+            select(BootstrapState)
+            .where(BootstrapState.id == 1)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if state is None or state.completed_at is None:
+            raise BootstrapClosed()
+        user = session.scalar(
+            select(User)
+            .where(User.normalized_email == normalized)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if user is None or not user.is_active or user.deleted_at is not None:
+            raise InvalidOnboarding()
+        credential = session.get(PasswordCredential, user.id, with_for_update=True)
+        if credential is None:
+            credential = PasswordCredential(user_id=user.id, password_hash=passwords.hash(password))
+            session.add(credential)
+        else:
+            credential.password_hash = passwords.hash(password)
+        grant = session.scalar(
+            select(PlatformAdminGrant)
+            .where(PlatformAdminGrant.user_id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        before = {"active": grant is not None and grant.revoked_at is None}
+        if grant is None:
+            grant = PlatformAdminGrant(user_id=user.id)
+            session.add(grant)
+            session.flush()
+        else:
+            grant.revoked_at = None
+        revoked_sessions = auth_repository.revoke_user_sessions(session, user.id)
+        _audit(
+            session,
+            actor_id=None,
+            organization_id=None,
+            action="operator.recovery",
+            target_id=grant.id,
+            before=before,
+            after={"active": True, "sessions_revoked": revoked_sessions},
+        )
+        auth_repository.audit(
+            session,
+            action="password.recovered",
+            target_id=user.id,
+            details={"method": "operator_recovery", "sessions_revoked": revoked_sessions},
         )
         return grant.id
 

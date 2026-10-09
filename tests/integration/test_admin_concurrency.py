@@ -268,27 +268,26 @@ def test_concurrent_archive_cannot_archive_both_administrators(
         )
 
 
-def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
+def test_concurrent_initial_platform_bootstraps_create_exactly_one_grant(
     integration_engine, shared_schema
 ):
     from editingtab_core.platform import services as platform
 
-    with (
-        scoped_connection(integration_engine, shared_schema) as connection,
-        Session(connection) as session,
-    ):
-        for name in ("first", "second"):
-            identity.create_user(session, email=f"{name}@example.test", display_name=name)
     pids = Queue()
 
-    def attempt(name):
+    def attempt():
         with scoped_connection(integration_engine, shared_schema) as connection:
             pid = connection.scalar(text("SELECT pg_backend_pid()"))
             connection.commit()
             pids.put(pid)
             with Session(connection) as session:
                 try:
-                    platform.bootstrap_initial(session, email=f"{name}@example.test")
+                    platform.bootstrap_initial(
+                        session,
+                        passwords=Passwords(),
+                        password="synthetic concurrent bootstrap password",
+                        display_name="Platform Administrator",
+                    )
                     return "granted"
                 except platform.BootstrapClosed:
                     return "closed"
@@ -296,7 +295,7 @@ def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
     with scoped_connection(integration_engine, shared_schema) as gate:
         gate.execute(text("SELECT id FROM core_platform_bootstrap WHERE id = 1 FOR UPDATE"))
         with ThreadPoolExecutor(max_workers=2) as workers:
-            futures = [workers.submit(attempt, name) for name in ("first", "second")]
+            futures = [workers.submit(attempt) for _ in range(2)]
             try:
                 worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
                 deadline = time.monotonic() + 2
@@ -316,7 +315,7 @@ def test_concurrent_initial_platform_bootstraps_allow_exactly_one(
                         time.sleep(0.01)
             finally:
                 gate.rollback()
-            assert sorted(f.result(timeout=5) for f in futures) == ["closed", "granted"]
+            assert [f.result(timeout=5) for f in futures] == ["granted", "granted"]
     with scoped_connection(integration_engine, shared_schema) as connection:
         assert connection.scalar(text("SELECT count(*) FROM core_platform_admin_grants")) == 1
         assert (
@@ -344,12 +343,19 @@ def test_concurrent_manager_scope_replacement_and_revocation_remain_consistent(
         Session(connection) as session,
     ):
         operator = identity.create_user(
-            session, email="manager-operator@example.test", display_name="Operator"
+            session,
+            email=platform_services.PLATFORM_ADMIN_EMAIL,
+            display_name="Platform Administrator",
         )
         manager = identity.create_user(
             session, email="concurrent-manager@example.test", display_name="Manager"
         )
-        platform_services.bootstrap_initial(session, email="manager-operator@example.test")
+        platform_services.bootstrap_initial(
+            session,
+            passwords=Passwords(),
+            password="synthetic concurrent manager password",
+            display_name="Platform Administrator",
+        )
         organization = identity.create_organization(
             session, name="Concurrent managers", slug="concurrent-managers"
         )

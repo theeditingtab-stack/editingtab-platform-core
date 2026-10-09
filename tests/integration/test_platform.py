@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from editingtab_core.app import create_app
+from editingtab_core.auth.models import PasswordCredential
 from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization import repository as authorization_repository
@@ -43,6 +44,15 @@ ORIGIN = "http://127.0.0.1:18080"
 PASSWORD = "synthetic platform test password"
 
 
+def bootstrap_platform(session, passwords=None):
+    return services.bootstrap_initial(
+        session,
+        passwords=passwords or Passwords(),
+        password=PASSWORD,
+        display_name="Platform Administrator",
+    )
+
+
 @pytest.fixture
 def setup(identity_session, integration_settings):
     passwords = Passwords()
@@ -52,11 +62,11 @@ def setup(identity_session, integration_settings):
             identity_session,
             settings=integration_settings,
             passwords=passwords,
-            email=f"{name}@example.test",
+            email=(services.PLATFORM_ADMIN_EMAIL if name == "operator" else f"{name}@example.test"),
             display_name=name,
             password=PASSWORD,
         )
-    grant = services.bootstrap_initial(identity_session, email="OPERATOR@example.test")
+    grant = bootstrap_platform(identity_session, passwords)
     return SimpleNamespace(**ids, grant=grant)
 
 
@@ -75,7 +85,7 @@ def onboard(session, env, **changes):
 @pytest.fixture
 def clients(migration_connection, integration_settings):
     @contextmanager
-    def make(email="operator@example.test", authenticated=True):
+    def make(email=services.PLATFORM_ADMIN_EMAIL, authenticated=True):
         app = create_app(
             integration_settings.model_copy(update={"auth_allowed_origins": (ORIGIN,)})
         )
@@ -452,42 +462,106 @@ def test_bootstrap_audits_operator_and_never_reopens_after_revocation(identity_s
         assert audit.target_id == setup.grant and audit.organization_id is None
         assert identity_session.get(BootstrapState, 1).completed_at is not None
     with pytest.raises(services.BootstrapClosed):
-        services.bootstrap_initial(identity_session, email="owner@example.test")
+        bootstrap_platform(identity_session)
     with identity_session.begin():
         assert identity_session.scalar(select(func.count()).select_from(PlatformAdminGrant)) == 1
 
 
+def test_fresh_bootstrap_is_idempotent_and_has_zero_tenant_memberships(identity_session):
+    passwords = Passwords()
+    grant = bootstrap_platform(identity_session, passwords)
+    with identity_session.begin():
+        row = identity_session.scalar(
+            select(User).where(User.normalized_email == services.PLATFORM_ADMIN_EMAIL)
+        )
+        original_hash = identity_session.get(PasswordCredential, row.id).password_hash
+        assert identity_session.scalar(select(func.count()).select_from(Membership)) == 0
+
+    repeated = services.bootstrap_initial(
+        identity_session,
+        passwords=passwords,
+        password="different password that must never be applied",
+        display_name="Must not overwrite",
+    )
+    with identity_session.begin():
+        row = identity_session.scalar(
+            select(User).where(User.normalized_email == services.PLATFORM_ADMIN_EMAIL)
+        )
+        assert repeated == grant
+        assert identity_session.get(PasswordCredential, row.id).password_hash == original_hash
+        assert row.display_name == "Platform Administrator"
+
+
+def test_explicit_platform_recovery_restores_grant_and_resets_credential(
+    identity_session,
+):
+    passwords = Passwords()
+    grant = bootstrap_platform(identity_session, passwords)
+    with identity_session.begin():
+        row = identity_session.scalar(
+            select(User).where(User.normalized_email == services.PLATFORM_ADMIN_EMAIL)
+        )
+        identity_session.get(PlatformAdminGrant, grant).revoked_at = datetime.now(UTC)
+        original_hash = identity_session.get(PasswordCredential, row.id).password_hash
+    recovery_password = "synthetic recovered platform password"
+    assert (
+        services.recover_platform_admin(
+            identity_session, passwords=passwords, password=recovery_password
+        )
+        == grant
+    )
+    with identity_session.begin():
+        row = identity_session.scalar(
+            select(User).where(User.normalized_email == services.PLATFORM_ADMIN_EMAIL)
+        )
+        credential = identity_session.get(PasswordCredential, row.id)
+        assert credential.password_hash != original_hash
+        assert passwords.verify(credential.password_hash, recovery_password)
+        assert identity_session.get(PlatformAdminGrant, grant).revoked_at is None
+        assert (
+            identity_session.scalar(
+                select(func.count())
+                .select_from(PlatformAudit)
+                .where(PlatformAudit.action == "operator.recovery")
+            )
+            == 1
+        )
+
+
 def test_bootstrap_failure_leaves_no_grant_marker_or_audit(identity_session):
-    user = identity.create_user(identity_session, email="first@example.test", display_name="First")
     with patch(
         "editingtab_core.platform.services._audit",
         side_effect=IntegrityError("hidden", {}, Exception("hidden")),
     ):
         with pytest.raises(StorageUnavailable):
-            services.bootstrap_initial(identity_session, email="first@example.test")
+            bootstrap_platform(identity_session)
     with identity_session.begin():
         assert identity_session.get(BootstrapState, 1).completed_at is None
         assert identity_session.scalar(select(func.count()).select_from(PlatformAdminGrant)) == 0
         assert identity_session.scalar(select(func.count()).select_from(PlatformAudit)) == 0
-    grant = services.bootstrap_initial(identity_session, email="first@example.test")
+    grant = bootstrap_platform(identity_session)
     with identity_session.begin():
-        assert identity_session.get(PlatformAdminGrant, grant).user_id == user
-
-
-@pytest.mark.parametrize("state", ["inactive", "archived", "missing"])
-def test_bootstrap_rejects_ineligible_user(identity_session, state):
-    if state != "missing":
-        user = identity.create_user(
-            identity_session, email="first@example.test", display_name="First"
+        user = identity_session.scalar(
+            select(User).where(User.normalized_email == services.PLATFORM_ADMIN_EMAIL)
         )
-        with identity_session.begin():
-            row = identity_session.get(User, user)
-            if state == "inactive":
-                row.is_active = False
-            else:
-                row.deleted_at = datetime.now(UTC)
+        assert identity_session.get(PlatformAdminGrant, grant).user_id == user.id
+
+
+@pytest.mark.parametrize("state", ["inactive", "archived"])
+def test_bootstrap_rejects_ineligible_user(identity_session, state):
+    user = identity.create_user(
+        identity_session,
+        email=services.PLATFORM_ADMIN_EMAIL,
+        display_name="Platform Administrator",
+    )
+    with identity_session.begin():
+        row = identity_session.get(User, user)
+        if state == "inactive":
+            row.is_active = False
+        else:
+            row.deleted_at = datetime.now(UTC)
     with pytest.raises(services.InvalidOnboarding):
-        services.bootstrap_initial(identity_session, email="first@example.test")
+        bootstrap_platform(identity_session)
     with identity_session.begin():
         assert identity_session.get(BootstrapState, 1).completed_at is None
 
@@ -723,7 +797,11 @@ def test_database_rejects_unsupported_entitlements(identity_session, setup, code
 
 @pytest.mark.parametrize("state", ["missing_marker", "completed_marker", "historical_grant"])
 def test_bootstrap_fails_closed_on_history_or_missing_sentinel(identity_session, state):
-    user = identity.create_user(identity_session, email="first@example.test", display_name="First")
+    user = identity.create_user(
+        identity_session,
+        email=services.PLATFORM_ADMIN_EMAIL,
+        display_name="Platform Administrator",
+    )
     with identity_session.begin():
         marker = identity_session.get(BootstrapState, 1)
         if state == "missing_marker":
@@ -734,7 +812,7 @@ def test_bootstrap_fails_closed_on_history_or_missing_sentinel(identity_session,
             identity_session.add(PlatformAdminGrant(user_id=user, revoked_at=datetime.now(UTC)))
     expected = StorageUnavailable if state == "missing_marker" else services.BootstrapClosed
     with pytest.raises(expected):
-        services.bootstrap_initial(identity_session, email="first@example.test")
+        bootstrap_platform(identity_session)
     with identity_session.begin():
         assert identity_session.scalar(select(func.count()).select_from(PlatformAdminGrant)) == (
             1 if state == "historical_grant" else 0

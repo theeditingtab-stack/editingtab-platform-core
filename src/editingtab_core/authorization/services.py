@@ -23,7 +23,9 @@ from editingtab_core.authorization.policy import (
     StorageUnavailable,
     role_name,
 )
+from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.models import Membership, Organization, User
+from editingtab_core.identity.normalization import clean_name
 
 
 @contextmanager
@@ -167,9 +169,15 @@ def _member_info(session, membership, user):
     return {
         "membership_id": membership.id,
         "user_id": user.id,
-        "display_name": user.display_name,
+        "display_name": membership.display_name or user.display_name,
         "email": user.email,
-        "state": "archived" if membership.deleted_at is not None else "active",
+        "state": (
+            "archived"
+            if membership.deleted_at is not None
+            else "active"
+            if membership.is_active
+            else "inactive"
+        ),
         "roles": [
             _role_info(session, role)
             for role in repo.membership_roles(session, membership.organization_id, membership.id)
@@ -195,6 +203,7 @@ def list_organizations(session, *, actor_id, limit=50, offset=0):
                 User.deleted_at.is_(None),
                 Organization.deleted_at.is_(None),
                 Membership.deleted_at.is_(None),
+                Membership.is_active.is_(True),
             )
             .order_by(Organization.id)
             .limit(limit)
@@ -241,7 +250,13 @@ def member_access(session, *, organization_id, actor_id, membership_id):
         membership, _ = row
         return {
             "membership_id": membership.id,
-            "state": "archived" if membership.deleted_at is not None else "active",
+            "state": (
+                "archived"
+                if membership.deleted_at is not None
+                else "active"
+                if membership.is_active
+                else "inactive"
+            ),
             "effective_permissions": sorted(
                 repo.effective_permissions(session, organization_id, membership.user_id)
             ),
@@ -274,13 +289,19 @@ def _initial_roles(session, organization_id, actor_id, role_ids):
 def _activate_member(session, organization_id, actor_id, membership, user, roles):
     action = None
     if membership is None:
-        membership = Membership(organization_id=organization_id, user_id=user.id)
+        membership = Membership(
+            organization_id=organization_id,
+            user_id=user.id,
+            is_active=True,
+            display_name=user.display_name,
+        )
         session.add(membership)
         session.flush()
         action = "member.added"
     elif membership.deleted_at is not None:
         before_membership_restore(session, organization_id, membership.id)
         membership.deleted_at = None
+        membership.is_active = True
         membership.updated_at = datetime.now(UTC)
         session.flush()
         action = "member.restored"
@@ -378,6 +399,66 @@ def archive_member(session, *, organization_id, actor_id, membership_id):
             membership.id,
             user.id,
         )
+
+
+def update_member(session, *, organization_id, actor_id, membership_id, display_name):
+    try:
+        value = clean_name(display_name)
+    except InvalidIdentity:
+        raise InvalidPermission() from None
+    with transaction(session):
+        authorize(session, organization_id, actor_id, MEMBER_MANAGE, lock=True)
+        row = session.execute(
+            repo.members(organization_id)
+            .where(Membership.id == membership_id, Membership.deleted_at.is_(None))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        membership, user = row
+        before = membership.display_name or user.display_name
+        if before != value:
+            membership.display_name = value
+            membership.updated_at = datetime.now(UTC)
+            repo.member_audit(
+                session,
+                organization_id,
+                actor_id,
+                "member.updated",
+                membership.id,
+                user.id,
+            )
+        return _member_info(session, membership, user)
+
+
+def set_member_active(session, *, organization_id, actor_id, membership_id, active):
+    if type(active) is not bool:
+        raise InvalidPermission()
+    with transaction(session):
+        organization, _ = authorize(session, organization_id, actor_id, MEMBER_MANAGE, lock=True)
+        row = session.execute(
+            repo.members(organization_id)
+            .where(Membership.id == membership_id, Membership.deleted_at.is_(None))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        membership, user = row
+        if membership.is_active == active:
+            return _member_info(session, membership, user)
+        if not active:
+            membership.is_active = False
+            session.flush()
+            ensure_administrator(session, organization.id)
+            action = "member.deactivated"
+        else:
+            membership.is_active = True
+            action = "member.reactivated"
+        membership.updated_at = datetime.now(UTC)
+        repo.member_audit(session, organization_id, actor_id, action, membership.id, user.id)
+        return _member_info(session, membership, user)
 
 
 def list_roles(session, *, organization_id, actor_id, limit=50, offset=0):
