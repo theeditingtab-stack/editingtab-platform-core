@@ -69,12 +69,18 @@ def valid_service(settings, header):
 def trusted_transport(scope, settings):
     if scope.get("scheme") == "https":
         return True
-    if settings.auth_secure_cookie or scope.get("scheme") != "http":
+    if scope.get("scheme") != "http":
         return False
     try:
-        return ipaddress.ip_address(scope["client"][0]).is_loopback
+        peer = ipaddress.ip_address(scope["client"][0])
     except (KeyError, TypeError, ValueError):
         return False
+    if any(
+        peer in ipaddress.ip_network(network)
+        for network in settings.booking_service_private_networks
+    ):
+        return True
+    return not settings.auth_secure_cookie and peer.is_loopback
 
 
 class BookingRequestGuard:

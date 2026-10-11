@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     booking_service_previous_digest: SecretStr | None = Field(
         default=None, repr=False, exclude=True
     )
+    booking_service_private_networks: tuple[str, ...] = ()
 
     @field_validator("booking_service_current_digest", "booking_service_previous_digest")
     @classmethod
@@ -51,6 +52,26 @@ class Settings(BaseSettings):
         if value is not None and re.fullmatch(r"[0-9a-f]{64}", value.get_secret_value()) is None:
             raise ValueError("Service digest must be lowercase SHA-256 hexadecimal.")
         return value
+
+    @field_validator("booking_service_private_networks")
+    @classmethod
+    def private_service_networks(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = []
+        for value in values:
+            try:
+                network = ipaddress.ip_network(value, strict=True)
+            except ValueError:
+                raise ValueError("Use canonical private CIDR networks") from None
+            if (
+                not network.is_private
+                or network.is_loopback
+                or network.is_link_local
+                or network.is_multicast
+                or network.is_unspecified
+            ):
+                raise ValueError("Booking service networks must be private non-loopback CIDRs")
+            normalized.append(str(network))
+        return tuple(normalized)
 
     @property
     def auth_secure_cookie(self) -> bool:

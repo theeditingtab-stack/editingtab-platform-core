@@ -79,6 +79,28 @@ def test_transport(settings, scheme, peer, production, allowed):
     assert trusted_transport({"scheme": scheme, "client": (peer, 100)}, settings) is allowed
 
 
+def test_production_private_http_requires_actual_peer_in_explicit_network(settings):
+    settings = settings.model_copy(
+        update={
+            "environment": "production",
+            "booking_service_private_networks": ("172.30.10.0/24",),
+        }
+    )
+
+    assert trusted_transport({"scheme": "http", "client": ("172.30.10.22", 100)}, settings)
+    assert not trusted_transport({"scheme": "http", "client": ("172.30.11.22", 100)}, settings)
+
+
+@pytest.mark.parametrize("network", ["0.0.0.0/0", "127.0.0.0/8", "8.8.8.0/24", "10.0.0.1/24"])
+def test_service_network_must_be_canonical_private_cidr(network):
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            db_password="test-only",
+            booking_service_private_networks=[network],
+        )
+
+
 def test_helper_exclusive_matching_files_without_output(tmp_path, capsys):
     path = Path(__file__).resolve().parents[2] / "scripts/init-booking-credential.py"
     spec = importlib.util.spec_from_file_location("credential_setup", path)
