@@ -352,6 +352,22 @@ def test_destructive_authorization_allows_platform_admin_without_membership(
     }
 
 
+def test_destructive_authorization_requires_recent_reauthentication(identity_session, env, clients):
+    with identity_session.begin():
+        login_session = identity_session.scalar(
+            select(LoginSession).where(
+                LoginSession.token_digest == token_digest(env.tokens["operator"])
+            )
+        )
+        login_session.reauthenticated_at = datetime.now(UTC) - timedelta(hours=1)
+    with clients() as client:
+        error(
+            destructive_request(client, env),
+            403,
+            "recent_reauthentication_required",
+        )
+
+
 def test_destructive_authorization_denies_tenant_admin_with_all_booking_permissions(
     identity_session, env, clients
 ):

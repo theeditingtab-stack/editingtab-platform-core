@@ -115,6 +115,7 @@ def add_session(session: Session, *, user_id: UUID, digest: str, seconds: int):
             user_id=user_id,
             token_digest=digest,
             created_at=now,
+            reauthenticated_at=now,
             expires_at=now + timedelta(seconds=seconds),
         )
     )

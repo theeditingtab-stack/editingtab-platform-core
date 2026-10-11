@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     auth_account_limit: int = Field(default=5, ge=1, le=100)
     auth_source_limit: int = Field(default=30, ge=1, le=1000)
     auth_invitation_seconds: int = Field(default=604800, ge=300, le=2592000)
+    auth_reauthentication_seconds: int = Field(default=900, ge=60, le=3600)
     auth_password_reset_seconds: int = Field(default=1800, ge=300, le=86400)
 
     booking_service_current_digest: SecretStr | None = Field(default=None, repr=False, exclude=True)

@@ -261,6 +261,26 @@ class PasswordChangeInput(BaseModel):
     new_password: SecretStr = Field(min_length=15, max_length=1024, repr=False, exclude=True)
 
 
+class ReauthenticationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    password: SecretStr = Field(min_length=15, max_length=1024, repr=False, exclude=True)
+
+
+@router.post("/reauthenticate", status_code=204)
+def reauthenticate(
+    body: ReauthenticationInput,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+):
+    services.reauthenticate(
+        session,
+        passwords=request.app.state.passwords,
+        token=request.cookies.get(COOKIE_NAME),
+        password=body.password.get_secret_value(),
+    )
+    return Response(status_code=204)
+
+
 @router.post("/password/change", status_code=204)
 def change_password(
     body: PasswordChangeInput,

@@ -199,7 +199,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0014_company_user_management"
+    assert expected_head == "0015_platform_owner_lifecycle"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -241,7 +241,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0014_company_user_management"
+        == "0015_platform_owner_lifecycle"
     )
 
 
@@ -401,7 +401,7 @@ def test_0013_downgrade_rejects_populated_designation_state(
         nested.rollback()
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0014_company_user_management"
+        == "0015_platform_owner_lifecycle"
     )
 
 

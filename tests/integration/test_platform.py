@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from editingtab_core.app import create_app
-from editingtab_core.auth.models import PasswordCredential
+from editingtab_core.auth.models import OrganizationInvitation, PasswordCredential
 from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization import repository as authorization_repository
@@ -166,6 +167,100 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
     # Platform authority is not membership and cannot access tenant APIs.
     with pytest.raises(Inaccessible):
         tenant.read_organization(identity_session, organization_id=org, actor_id=setup.operator)
+
+
+def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle(
+    identity_session, setup, clients
+):
+    with clients() as client:
+        created = client.post(
+            "/platform/organizations",
+            json={
+                "name": "Invitation First Hotel",
+                "slug": "invitation-first-hotel",
+                "owner_name": "New Hotel Owner",
+                "owner_email": "new-owner@example.test",
+                "enabled_modules": ["booking"],
+            },
+            headers={"Origin": ORIGIN},
+        )
+        assert created.status_code == 201
+        body = created.json()
+        assert body["owner"]["status"] == "pending"
+        old_token = body["owner"]["development_token"]
+        resent = client.post(
+            f"/platform/organizations/{body['id']}/owner-invitation/resend",
+            headers={"Origin": ORIGIN},
+        )
+        assert resent.status_code == 200
+        token = resent.json()["development_token"]
+        assert token != old_token
+        assert (
+            client.post(
+                "/auth/invitations/accept",
+                json={
+                    "token": old_token,
+                    "email": "new-owner@example.test",
+                    "password": "new owner synthetic password",
+                },
+                headers={"Origin": ORIGIN},
+            ).status_code
+            == 401
+        )
+
+        accepted = client.post(
+            "/auth/invitations/accept",
+            json={
+                "token": token,
+                "email": "new-owner@example.test",
+                "password": "new owner synthetic password",
+            },
+            headers={"Origin": ORIGIN},
+        )
+        assert accepted.status_code == 200
+        assert (
+            client.post(
+                "/auth/invitations/accept",
+                json={
+                    "token": token,
+                    "email": "new-owner@example.test",
+                    "password": "new owner synthetic password",
+                },
+                headers={"Origin": ORIGIN},
+            ).status_code
+            == 401
+        )
+        detail = client.get(f"/platform/organizations/{body['id']}")
+        assert detail.json()["owner"]["status"] == "active"
+
+        archived = client.post(
+            f"/platform/organizations/{body['id']}/archive", headers={"Origin": ORIGIN}
+        )
+        assert archived.status_code == 200 and archived.json()["archived_at"] is not None
+        restored = client.post(
+            f"/platform/organizations/{body['id']}/restore", headers={"Origin": ORIGIN}
+        )
+        assert restored.status_code == 200 and restored.json()["archived_at"] is None
+        actions = {
+            row["action"]
+            for row in client.get(f"/platform/organizations/{body['id']}/audit").json()
+        }
+        assert {
+            "organization.onboarded",
+            "owner.invitation.reissued",
+            "owner.activated",
+            "organization.archived",
+            "organization.restored",
+        } <= actions
+
+    with identity_session.begin():
+        invitation = identity_session.scalar(
+            select(OrganizationInvitation).where(
+                OrganizationInvitation.organization_id == UUID(body["id"]),
+                OrganizationInvitation.accepted_at.is_not(None),
+            )
+        )
+        assert invitation.accepted_at is not None
 
 
 def test_onboarded_owner_can_delegate_company_administration_without_platform_grants(
@@ -595,7 +690,12 @@ def test_tenant_users_denied_all_platform_operations(identity_session, setup, cl
             (
                 "POST",
                 "/platform/organizations",
-                {"name": "Other", "slug": "other", "owner_email": email},
+                {
+                    "name": "Other",
+                    "slug": "other",
+                    "owner_name": "Other Owner",
+                    "owner_email": email,
+                },
             ),
             ("GET", f"/platform/organizations/{org}/modules", None),
             ("PUT", f"/platform/organizations/{org}/modules/booking", {"enabled": False}),
@@ -624,7 +724,12 @@ def test_unauthenticated_platform_and_tenant_routes_denied(identity_session, set
             (
                 "POST",
                 "/platform/organizations",
-                {"name": "Other", "slug": "other", "owner_email": "owner@example.test"},
+                {
+                    "name": "Other",
+                    "slug": "other",
+                    "owner_name": "Other Owner",
+                    "owner_email": "owner@example.test",
+                },
             ),
             ("GET", f"/platform/organizations/{org}/modules", None),
             ("PUT", f"/platform/organizations/{org}/modules/booking", {"enabled": False}),
@@ -642,6 +747,7 @@ def test_platform_http_origin_input_validation_pagination_and_no_tenant_bypass(
     body = {
         "name": "Client",
         "slug": "client",
+        "owner_name": "Client Owner",
         "owner_email": "owner@example.test",
         "enabled_modules": ["booking"],
     }
@@ -667,9 +773,18 @@ def test_platform_http_origin_input_validation_pagination_and_no_tenant_bypass(
             )
         response = client.post("/platform/organizations", json=body, headers={"Origin": ORIGIN})
         assert response.status_code == 201
-        assert set(response.json()) == {"id", "name", "slug", "enabled_modules"}
+        assert set(response.json()) == {
+            "id",
+            "name",
+            "slug",
+            "archived_at",
+            "enabled_modules",
+            "owner",
+        }
         org = response.json()["id"]
-        assert client.get(f"/platform/organizations/{org}").json() == response.json()
+        created_detail = response.json()
+        created_detail["owner"].pop("development_token")
+        assert client.get(f"/platform/organizations/{org}").json() == created_detail
         assert client.get(f"/organizations/{org}").status_code == 404
         assert client.get(f"/organizations/{org}/modules").status_code == 404
         assert (

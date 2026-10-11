@@ -28,6 +28,7 @@ from editingtab_core.auth.security import (
 )
 from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization import services as authorization_services
+from editingtab_core.authorization.models import Role
 from editingtab_core.authorization.policy import MEMBER_MANAGE, AccessError, Conflict
 from editingtab_core.config import Settings
 from editingtab_core.identity.errors import InvalidIdentity
@@ -266,6 +267,25 @@ def change_password(
         )
 
 
+def reauthenticate(
+    session: Session, *, passwords: Passwords, token: str | None, password: str
+) -> None:
+    """Verify the current password and mark only this browser session as recent."""
+    validate_password(password)
+    with transaction(session):
+        user, current = _session_identity(session, token, lock=True)
+        credential = session.get(PasswordCredential, user.id, with_for_update=True)
+        if credential is None or not passwords.verify(credential.password_hash, password):
+            raise AuthenticationError("Authentication failed.")
+        current.reauthenticated_at = session.scalar(select(func.clock_timestamp()))
+        repository.audit(
+            session,
+            action="session.reauthenticated",
+            actor_id=user.id,
+            target_id=current.id,
+        )
+
+
 def create_invitation(
     session: Session,
     *,
@@ -454,15 +474,32 @@ def accept_invitation(
         ):
             raise AuthenticationError("Invitation unavailable.")
         try:
-            authorization_services.authorize(
-                session, invitation.organization_id, invitation.inviter_id, MEMBER_MANAGE
-            )
-            roles = authorization_services._initial_roles(
-                session,
-                invitation.organization_id,
-                invitation.inviter_id,
-                repository.invitation_roles(session, invitation.id),
-            )
+            if invitation.kind == "organization_owner":
+                from editingtab_core.platform.services import _require_platform
+
+                _require_platform(session, invitation.inviter_id)
+                role_ids = repository.invitation_roles(session, invitation.id)
+                roles = list(
+                    session.scalars(
+                        select(Role).where(
+                            Role.organization_id == invitation.organization_id,
+                            Role.id.in_(role_ids),
+                            Role.deleted_at.is_(None),
+                        )
+                    )
+                )
+                if len(roles) != len(role_ids):
+                    raise AccessError()
+            else:
+                authorization_services.authorize(
+                    session, invitation.organization_id, invitation.inviter_id, MEMBER_MANAGE
+                )
+                roles = authorization_services._initial_roles(
+                    session,
+                    invitation.organization_id,
+                    invitation.inviter_id,
+                    repository.invitation_roles(session, invitation.id),
+                )
         except AccessError:
             raise AuthenticationError("Invitation unavailable.") from None
         user = session.scalar(
@@ -471,10 +508,11 @@ def accept_invitation(
             .with_for_update()
         )
         if user is None:
-            if display_name is None or password is None:
+            effective_name = display_name or invitation.intended_display_name
+            if effective_name is None or password is None:
                 raise AuthenticationError("Invitation requires account setup.")
             try:
-                cleaned_name = clean_name(display_name)
+                cleaned_name = clean_name(effective_name)
             except InvalidIdentity:
                 raise AuthenticationError("Invitation unavailable.") from None
             user = User(email=normalized, normalized_email=normalized, display_name=cleaned_name)
@@ -518,6 +556,18 @@ def accept_invitation(
             target_id=invitation.id,
             details={"membership_id": str(result["membership_id"])},
         )
+        if invitation.kind == "organization_owner":
+            from editingtab_core.platform.services import _audit
+
+            _audit(
+                session,
+                actor_id=user.id,
+                organization_id=invitation.organization_id,
+                action="owner.activated",
+                target_id=invitation.id,
+                before={"status": "pending"},
+                after={"status": "active", "membership_id": str(result["membership_id"])},
+            )
         return result
 
 

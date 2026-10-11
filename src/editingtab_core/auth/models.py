@@ -46,6 +46,7 @@ class LoginSession(Base):
     token_digest: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reauthenticated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -66,6 +67,9 @@ class OrganizationInvitation(Base):
         UniqueConstraint("id", "organization_id", name="uq_core_invitations_id_organization"),
         CheckConstraint("expires_at > created_at", name="ck_core_invitations_expiry"),
         CheckConstraint("token_digest ~ '^[0-9a-f]{64}$'", name="ck_core_invitations_digest"),
+        CheckConstraint(
+            "kind IN ('employee', 'organization_owner')", name="ck_core_invitations_kind"
+        ),
         Index("ix_core_invitations_organization", "organization_id", "created_at"),
         Index("ix_core_invitations_expiry", "expires_at"),
     )
@@ -80,6 +84,8 @@ class OrganizationInvitation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kind: Mapped[str] = mapped_column(String(32), default="employee", server_default="employee")
+    intended_display_name: Mapped[str | None] = mapped_column(String(200))
 
 
 class InvitationRole(Base):

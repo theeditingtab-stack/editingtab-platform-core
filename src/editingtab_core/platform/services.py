@@ -1,20 +1,25 @@
-"""Company operations with current authority checks and atomic writes."""
+"""Global platform administration with current authority checks and atomic writes."""
 
-from datetime import UTC, datetime
+import secrets
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from editingtab_core.auth import repository as auth_repository
-from editingtab_core.auth.models import PasswordCredential
-from editingtab_core.auth.security import Passwords, validate_password
+from editingtab_core.auth.models import InvitationRole, OrganizationInvitation, PasswordCredential
+from editingtab_core.auth.security import Passwords, token_digest, validate_password
+from editingtab_core.authorization import repository as authorization_repository
+from editingtab_core.authorization.models import Role
 from editingtab_core.authorization.onboarding import _create_owned_organization
 from editingtab_core.authorization.policy import (
+    OWNER_PERMISSIONS,
     AccessError,
     Conflict,
     Inaccessible,
     StorageUnavailable,
 )
 from editingtab_core.authorization.services import authorize, transaction
+from editingtab_core.identity import repository as identity_repository
 from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.models import Organization, User
 from editingtab_core.identity.normalization import clean_name, normalize_email, normalize_slug
@@ -240,23 +245,88 @@ def _organization(session, organization_id, *, lock=False):
     return org
 
 
+def _organization_any_state(session, organization_id, *, lock=False):
+    query = select(Organization).where(Organization.id == organization_id)
+    if lock:
+        query = query.with_for_update()
+    org = session.scalar(query.execution_options(populate_existing=True))
+    if org is None:
+        raise Inaccessible()
+    return org
+
+
 def _info(org):
-    return {"id": org.id, "name": org.name, "slug": org.slug}
+    return {
+        "id": org.id,
+        "name": org.name,
+        "slug": org.slug,
+        "archived_at": org.deleted_at,
+    }
 
 
-def list_organizations(session, *, actor_id, limit=50, offset=0):
+def _owner_invitation(session, organization_id):
+    return session.scalar(
+        select(OrganizationInvitation)
+        .where(
+            OrganizationInvitation.organization_id == organization_id,
+            OrganizationInvitation.kind == "organization_owner",
+        )
+        .order_by(OrganizationInvitation.created_at.desc(), OrganizationInvitation.id.desc())
+        .limit(1)
+    )
+
+
+def _owner_info(session, organization_id):
+    invitation = _owner_invitation(session, organization_id)
+    if invitation is None:
+        return None
+    now = session.scalar(select(func.clock_timestamp()))
+    if invitation.accepted_at is not None:
+        status = "active"
+    elif invitation.revoked_at is not None:
+        status = "revoked"
+    elif invitation.expires_at <= now:
+        status = "expired"
+    else:
+        status = "pending"
+    return {
+        "invitation_id": invitation.id,
+        "full_name": invitation.intended_display_name,
+        "email": invitation.normalized_email,
+        "status": status,
+        "created_at": invitation.created_at,
+        "expires_at": invitation.expires_at,
+        "accepted_at": invitation.accepted_at,
+        "revoked_at": invitation.revoked_at,
+        "delivery_status": "adapter_required",
+    }
+
+
+def _detail(session, org):
+    return {
+        **_info(org),
+        "enabled_modules": _enabled(session, org.id),
+        "owner": _owner_info(session, org.id),
+    }
+
+
+def list_organizations(
+    session, *, actor_id, limit=50, offset=0, search=None, include_archived=False
+):
     with transaction(session):
         _require_platform(session, actor_id)
         if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
             raise InvalidOnboarding()
+        query = select(Organization)
+        if not include_archived:
+            query = query.where(Organization.deleted_at.is_(None))
+        if search:
+            term = f"%{search.strip()}%"
+            query = query.where(Organization.name.ilike(term) | Organization.slug.ilike(term))
         return [
             _info(org)
             for org in session.scalars(
-                select(Organization)
-                .where(Organization.deleted_at.is_(None))
-                .order_by(Organization.id)
-                .limit(limit)
-                .offset(offset)
+                query.order_by(Organization.name, Organization.id).limit(limit).offset(offset)
             )
         ]
 
@@ -264,16 +334,61 @@ def list_organizations(session, *, actor_id, limit=50, offset=0):
 def read_organization(session, *, actor_id, organization_id):
     with transaction(session):
         _require_platform(session, actor_id)
-        org = _organization(session, organization_id)
-        return {**_info(org), "enabled_modules": _enabled(session, organization_id)}
+        org = _organization_any_state(session, organization_id)
+        return _detail(session, org)
 
 
-def onboard(session, *, actor_id, name, slug, owner_email, enabled_modules=()):
+def _issue_owner_invitation(session, *, settings, org, actor_id, owner_name, owner_email, role_id):
+    token = secrets.token_urlsafe(32)
+    now = session.scalar(select(func.clock_timestamp()))
+    invitation = OrganizationInvitation(
+        organization_id=org.id,
+        normalized_email=owner_email,
+        inviter_id=actor_id,
+        token_digest=token_digest(token),
+        created_at=now,
+        expires_at=now + timedelta(seconds=settings.auth_invitation_seconds),
+        kind="organization_owner",
+        intended_display_name=owner_name,
+    )
+    session.add(invitation)
+    session.flush()
+    session.add(
+        InvitationRole(
+            organization_id=org.id,
+            invitation_id=invitation.id,
+            role_id=role_id,
+        )
+    )
+    auth_repository.audit(
+        session,
+        action="invitation.created",
+        actor_id=actor_id,
+        organization_id=org.id,
+        target_id=invitation.id,
+        details={"purpose": "organization_owner", "role_ids": [str(role_id)]},
+    )
+    return invitation, token
+
+
+def onboard(
+    session,
+    *,
+    actor_id,
+    name,
+    slug,
+    owner_email,
+    enabled_modules=(),
+    owner_name=None,
+    settings=None,
+):
     try:
         with transaction(session):
             _require_platform(session, actor_id)
             try:
                 name, slug = clean_name(name), normalize_slug(slug)
+                if owner_name is not None:
+                    owner_name = clean_name(owner_name)
                 _, normalized = normalize_email(owner_email)
             except InvalidIdentity:
                 raise InvalidOnboarding() from None
@@ -282,25 +397,69 @@ def onboard(session, *, actor_id, name, slug, owner_email, enabled_modules=()):
                 _module(code, True)
             if session.scalar(select(Organization.id).where(Organization.slug == slug)) is not None:
                 raise Conflict()
-            owner_id = session.scalar(
-                select(User.id)
-                .join(PasswordCredential)
-                .where(
-                    User.normalized_email == normalized,
-                    User.is_active.is_(True),
-                    User.deleted_at.is_(None),
-                )
-                .with_for_update(of=User)
+            existing_user = session.scalar(
+                select(User).where(User.normalized_email == normalized).with_for_update()
             )
-            if owner_id is None:
+            if existing_user is not None and existing_user.deleted_at is not None:
                 raise InvalidOnboarding()
-            org = _create_owned_organization(
-                session, name=name, slug=slug, owner_id=owner_id, actor_id=actor_id
+            if owner_name is None:
+                owner_id = session.scalar(
+                    select(User.id)
+                    .join(PasswordCredential)
+                    .where(
+                        User.normalized_email == normalized,
+                        User.is_active.is_(True),
+                        User.deleted_at.is_(None),
+                    )
+                    .with_for_update(of=User)
+                )
+                if owner_id is None:
+                    raise InvalidOnboarding()
+                org = _create_owned_organization(
+                    session, name=name, slug=slug, owner_id=owner_id, actor_id=actor_id
+                )
+                for code in sorted(modules):
+                    session.add(
+                        ModuleEntitlement(organization_id=org.id, module_code=code, enabled=True)
+                    )
+                _audit(
+                    session,
+                    actor_id=actor_id,
+                    organization_id=org.id,
+                    action="organization.onboarded",
+                    target_id=org.id,
+                    before={},
+                    after={"owner_id": str(owner_id), "enabled_modules": sorted(modules)},
+                )
+                return {**_info(org), "enabled_modules": sorted(modules)}
+            if settings is None:
+                raise InvalidOnboarding()
+            org = identity_repository.create_organization(session, name=name, slug=slug)
+            role = Role(
+                organization_id=org.id,
+                name="Organization owner",
+                normalized_name="organization owner",
+            )
+            session.add(role)
+            session.flush()
+            permissions = dict.fromkeys(OWNER_PERMISSIONS, True)
+            authorization_repository.replace_permissions(session, org.id, role.id, permissions)
+            authorization_repository.audit(
+                session, org.id, actor_id, "role.bootstrapped", role.id, {}, permissions
             )
             for code in sorted(modules):
                 session.add(
                     ModuleEntitlement(organization_id=org.id, module_code=code, enabled=True)
                 )
+            invitation, token = _issue_owner_invitation(
+                session,
+                settings=settings,
+                org=org,
+                actor_id=actor_id,
+                owner_name=owner_name,
+                owner_email=normalized,
+                role_id=role.id,
+            )
             _audit(
                 session,
                 actor_id=actor_id,
@@ -308,11 +467,167 @@ def onboard(session, *, actor_id, name, slug, owner_email, enabled_modules=()):
                 action="organization.onboarded",
                 target_id=org.id,
                 before={},
-                after={"owner_id": str(owner_id), "enabled_modules": sorted(modules)},
+                after={
+                    "owner_email": normalized,
+                    "owner_invitation_id": str(invitation.id),
+                    "enabled_modules": sorted(modules),
+                },
             )
-            return {**_info(org), "enabled_modules": sorted(modules)}
+            return _detail(session, org), token
     except Conflict:
         raise OrganizationConflict() from None
+
+
+def resend_owner_invitation(session, *, settings, actor_id, organization_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        org = _organization(session, organization_id, lock=True)
+        previous = _owner_invitation(session, organization_id)
+        if previous is None or previous.accepted_at is not None:
+            raise Conflict()
+        previous.revoked_at = session.scalar(select(func.clock_timestamp()))
+        role_id = session.scalar(
+            select(InvitationRole.role_id).where(InvitationRole.invitation_id == previous.id)
+        )
+        if role_id is None:
+            raise StorageUnavailable()
+        auth_repository.audit(
+            session,
+            action="invitation.revoked",
+            actor_id=actor_id,
+            organization_id=organization_id,
+            target_id=previous.id,
+            details={"reason": "reissued"},
+        )
+        invitation, token = _issue_owner_invitation(
+            session,
+            settings=settings,
+            org=org,
+            actor_id=actor_id,
+            owner_name=previous.intended_display_name,
+            owner_email=previous.normalized_email,
+            role_id=role_id,
+        )
+        _audit(
+            session,
+            actor_id=actor_id,
+            organization_id=organization_id,
+            action="owner.invitation.reissued",
+            target_id=invitation.id,
+            before={"invitation_id": str(previous.id)},
+            after={"invitation_id": str(invitation.id)},
+        )
+        return _owner_info(session, organization_id), token
+
+
+def revoke_owner_invitation(session, *, actor_id, organization_id, invitation_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        _organization(session, organization_id, lock=True)
+        invitation = session.scalar(
+            select(OrganizationInvitation)
+            .where(
+                OrganizationInvitation.id == invitation_id,
+                OrganizationInvitation.organization_id == organization_id,
+                OrganizationInvitation.kind == "organization_owner",
+            )
+            .with_for_update()
+        )
+        if invitation is None:
+            raise Inaccessible()
+        if invitation.accepted_at is not None:
+            raise Conflict()
+        if invitation.revoked_at is None:
+            invitation.revoked_at = session.scalar(select(func.clock_timestamp()))
+            auth_repository.audit(
+                session,
+                action="invitation.revoked",
+                actor_id=actor_id,
+                organization_id=organization_id,
+                target_id=invitation.id,
+                details={"reason": "platform_administrator"},
+            )
+            _audit(
+                session,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                action="owner.invitation.revoked",
+                target_id=invitation.id,
+                before={"status": "pending"},
+                after={"status": "revoked"},
+            )
+
+
+def archive_organization(session, *, actor_id, organization_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        org = _organization_any_state(session, organization_id, lock=True)
+        if org.deleted_at is None:
+            org.deleted_at = session.scalar(select(func.clock_timestamp()))
+            session.execute(
+                update(OrganizationInvitation)
+                .where(
+                    OrganizationInvitation.organization_id == organization_id,
+                    OrganizationInvitation.accepted_at.is_(None),
+                    OrganizationInvitation.revoked_at.is_(None),
+                )
+                .values(revoked_at=func.clock_timestamp())
+            )
+            _audit(
+                session,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                action="organization.archived",
+                target_id=organization_id,
+                before={"archived": False},
+                after={"archived": True},
+            )
+        return _detail(session, org)
+
+
+def restore_organization(session, *, actor_id, organization_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        org = _organization_any_state(session, organization_id, lock=True)
+        if org.deleted_at is not None:
+            org.deleted_at = None
+            _audit(
+                session,
+                actor_id=actor_id,
+                organization_id=organization_id,
+                action="organization.restored",
+                target_id=organization_id,
+                before={"archived": True},
+                after={"archived": False},
+            )
+        return _detail(session, org)
+
+
+def list_audit(session, *, actor_id, organization_id, limit=100, offset=0):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        _organization_any_state(session, organization_id)
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+            raise InvalidOnboarding()
+        rows = session.scalars(
+            select(PlatformAudit)
+            .where(PlatformAudit.organization_id == organization_id)
+            .order_by(PlatformAudit.created_at.desc(), PlatformAudit.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return [
+            {
+                "id": row.id,
+                "action": row.action,
+                "actor_id": row.actor_id,
+                "target_id": row.target_id,
+                "created_at": row.created_at,
+                "before": row.before,
+                "after": row.after,
+            }
+            for row in rows
+        ]
 
 
 def _enabled(session, organization_id):

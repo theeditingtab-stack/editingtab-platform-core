@@ -1,9 +1,10 @@
 """Explicit platform routes; tenant module reads retain tenant authorization."""
 
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
 
 from editingtab_core.authorization.http import Actor, Database, Limit, Offset
@@ -17,6 +18,7 @@ class OnboardingInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
     slug: str = Field(min_length=1, max_length=63)
+    owner_name: str = Field(min_length=1, max_length=200)
     owner_email: str = Field(min_length=1, max_length=254)
     enabled_modules: list[str] = Field(default_factory=list, max_length=4)
 
@@ -31,10 +33,37 @@ class PlatformOrganizationOutput(BaseModel):
     id: UUID
     name: str
     slug: str
+    archived_at: datetime | None = None
+
+
+class OwnerInvitationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    invitation_id: UUID
+    full_name: str | None
+    email: str
+    status: Literal["pending", "active", "expired", "revoked"]
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None
+    revoked_at: datetime | None
+    delivery_status: Literal["adapter_required"]
+    development_token: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class PlatformOrganizationDetailOutput(PlatformOrganizationOutput):
     enabled_modules: list[str]
+    owner: OwnerInvitationOutput | None = None
+
+
+class PlatformAuditOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    action: str
+    actor_id: UUID | None
+    target_id: UUID
+    created_at: datetime
+    before: dict
+    after: dict
 
 
 class EntitlementsOutput(BaseModel):
@@ -76,18 +105,120 @@ class BookingPermissionManagerOutput(BaseModel):
 
 
 @router.get("/organizations", response_model=list[PlatformOrganizationOutput])
-def organizations(session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0):
-    return services.list_organizations(session, actor_id=actor_id, limit=limit, offset=offset)
+def organizations(
+    session: Database,
+    actor_id: Actor,
+    limit: Limit = 50,
+    offset: Offset = 0,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    include_archived: bool = False,
+):
+    return services.list_organizations(
+        session,
+        actor_id=actor_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+        include_archived=include_archived,
+    )
 
 
-@router.post("/organizations", status_code=201, response_model=PlatformOrganizationDetailOutput)
-def onboard(body: OnboardingInput, session: Database, actor_id: Actor):
-    return services.onboard(session, actor_id=actor_id, **body.model_dump())
+@router.post(
+    "/organizations",
+    status_code=201,
+    response_model=PlatformOrganizationDetailOutput,
+)
+def onboard(body: OnboardingInput, request: Request, session: Database, actor_id: Actor):
+    result, token = services.onboard(
+        session,
+        settings=request.app.state.settings,
+        actor_id=actor_id,
+        **body.model_dump(),
+    )
+    if (
+        request.app.state.settings.environment in {"development", "test"}
+        and "environment" in request.app.state.settings.model_fields_set
+    ):
+        result["owner"]["development_token"] = token
+    return result
 
 
-@router.get("/organizations/{organization_id}", response_model=PlatformOrganizationDetailOutput)
+@router.get(
+    "/organizations/{organization_id}",
+    response_model=PlatformOrganizationDetailOutput,
+)
 def organization(organization_id: UUID, session: Database, actor_id: Actor):
     return services.read_organization(session, actor_id=actor_id, organization_id=organization_id)
+
+
+@router.post(
+    "/organizations/{organization_id}/owner-invitation/resend",
+    response_model=OwnerInvitationOutput,
+    response_model_exclude_none=True,
+)
+def resend_owner_invitation(
+    organization_id: UUID, request: Request, session: Database, actor_id: Actor
+):
+    result, token = services.resend_owner_invitation(
+        session,
+        settings=request.app.state.settings,
+        actor_id=actor_id,
+        organization_id=organization_id,
+    )
+    if (
+        request.app.state.settings.environment in {"development", "test"}
+        and "environment" in request.app.state.settings.model_fields_set
+    ):
+        result["development_token"] = token
+    return result
+
+
+@router.delete("/organizations/{organization_id}/owner-invitation/{invitation_id}", status_code=204)
+def revoke_owner_invitation(
+    organization_id: UUID, invitation_id: UUID, session: Database, actor_id: Actor
+):
+    services.revoke_owner_invitation(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        invitation_id=invitation_id,
+    )
+    return Response(status_code=204)
+
+
+@router.post(
+    "/organizations/{organization_id}/archive", response_model=PlatformOrganizationDetailOutput
+)
+def archive_organization(organization_id: UUID, session: Database, actor_id: Actor):
+    return services.archive_organization(
+        session, actor_id=actor_id, organization_id=organization_id
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/restore", response_model=PlatformOrganizationDetailOutput
+)
+def restore_organization(organization_id: UUID, session: Database, actor_id: Actor):
+    return services.restore_organization(
+        session, actor_id=actor_id, organization_id=organization_id
+    )
+
+
+@router.get("/organizations/{organization_id}/audit", response_model=list[PlatformAuditOutput])
+def audit_history(
+    organization_id: UUID,
+    session: Database,
+    actor_id: Actor,
+    limit: Limit = 100,
+    offset: Offset = 0,
+):
+    return services.list_audit(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/organizations/{organization_id}/modules", response_model=EntitlementsOutput)

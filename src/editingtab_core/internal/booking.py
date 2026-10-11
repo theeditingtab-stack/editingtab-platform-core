@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func, select
 from starlette.responses import JSONResponse
 
 from editingtab_core.auth import repository as auth_repo
@@ -187,7 +188,9 @@ def authorize_booking(session, *, token, organization_id, permission):
         raise AuthorizationFailure(503, "authorization_unavailable") from None
 
 
-def authorize_destructive_booking_operation(session, *, token, organization_id, operation):
+def authorize_destructive_booking_operation(
+    session, *, settings, token, organization_id, operation
+):
     if operation not in SUPPORTED_DESTRUCTIVE_OPERATIONS:
         raise AuthorizationFailure(422, "invalid_authorization_request")
     digest = token_digest(token)
@@ -195,9 +198,17 @@ def authorize_destructive_booking_operation(session, *, token, organization_id, 
         raise AuthorizationFailure(401, "invalid_user_session")
     try:
         with transaction(session):
-            user = auth_repo.authenticated_user(session, digest)
-            if user is None:
+            identity = auth_repo.authenticated_session(session, digest)
+            if identity is None:
                 raise AuthorizationFailure(401, "invalid_user_session")
+            user, login_session = identity
+            now = session.scalar(select(func.clock_timestamp()))
+            if (
+                login_session.reauthenticated_at is None
+                or (now - login_session.reauthenticated_at).total_seconds()
+                > settings.auth_reauthentication_seconds
+            ):
+                raise AuthorizationFailure(403, "recent_reauthentication_required")
             try:
                 _require_platform(session, user.id)
             except AccessError:
@@ -243,6 +254,7 @@ def booking_destructive_authorize(
 ):
     return authorize_destructive_booking_operation(
         session,
+        settings=request.app.state.settings,
         token=request.headers.get("x-core-session"),
         organization_id=body.organization_id,
         operation=body.operation,
