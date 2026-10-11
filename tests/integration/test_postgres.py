@@ -22,6 +22,7 @@ from editingtab_core.authorization.models import (
     RolePermission,
 )
 from editingtab_core.authorization.policy import BOOKING_PERMISSIONS
+from editingtab_core.database import get_session
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
 
@@ -405,7 +406,13 @@ def test_0013_downgrade_rejects_populated_designation_state(
     )
 
 
-def test_real_readiness(integration_settings):
-    with TestClient(create_app(integration_settings)) as client:
-        assert client.get("/health/ready").status_code == 200
-        assert client.get("/health/ready").json() == {"status": "ready"}
+def test_real_readiness_requires_migrated_schema(
+    integration_settings, migration_config, migration_connection
+):
+    command.upgrade(migration_config, "head")
+    app = create_app(integration_settings)
+    with Session(bind=migration_connection) as session:
+        app.dependency_overrides[get_session] = lambda: session
+        with TestClient(app) as client:
+            assert client.get("/health/ready").status_code == 200
+            assert client.get("/health/ready").json() == {"status": "ready"}

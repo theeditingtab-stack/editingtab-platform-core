@@ -33,6 +33,8 @@ from editingtab_core.internal.booking import router as internal_router
 from editingtab_core.platform.http import router as platform_router
 from editingtab_core.platform.http import tenant_router
 
+SCHEMA_HEAD = "0015_platform_owner_lifecycle"
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings if settings is not None else load_settings()
@@ -104,9 +106,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/ready", response_model=None)
     def ready(session: Annotated[Session, Depends(get_session)]) -> dict[str, str] | JSONResponse:
         try:
-            session.execute(text("SELECT 1")).scalar_one()
+            revision = session.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         except SQLAlchemyError:
             # Never log the driver exception: it may contain connection details.
+            return JSONResponse(status_code=503, content={"status": "unavailable"})
+        if revision != SCHEMA_HEAD:
             return JSONResponse(status_code=503, content={"status": "unavailable"})
         return {"status": "ready"}
 

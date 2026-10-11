@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
-from editingtab_core.app import create_app
+from editingtab_core.app import SCHEMA_HEAD, create_app
 from editingtab_core.database import get_session
 
 
@@ -22,21 +22,34 @@ def test_live_does_not_connect_and_engine_is_disposed(settings):
 
 def test_readiness_success_is_mocked(settings):
     session = MagicMock()
-    session.execute.return_value.scalar_one.return_value = 1
+    session.execute.return_value.scalar_one.return_value = SCHEMA_HEAD
     app = create_app(settings)
     app.dependency_overrides[get_session] = lambda: session
     with TestClient(app) as client:
         response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
-    assert str(session.execute.call_args.args[0]) == "SELECT 1"
+    assert str(session.execute.call_args.args[0]) == "SELECT version_num FROM alembic_version"
+
+
+def test_readiness_rejects_database_behind_application_head(settings):
+    session = MagicMock()
+    session.execute.return_value.scalar_one.return_value = "0014_company_user_management"
+    app = create_app(settings)
+    app.dependency_overrides[get_session] = lambda: session
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
 
 
 def test_readiness_failure_is_generic_and_can_recover(settings, caplog):
     password = settings.db_password.get_secret_value()
     session = MagicMock()
     session.execute.side_effect = OperationalError(
-        "SELECT 1", {}, Exception(f"connection failed: {password}")
+        "SELECT version_num FROM alembic_version",
+        {},
+        Exception(f"connection failed: {password}"),
     )
     app = create_app(settings)
     app.dependency_overrides[get_session] = lambda: session
@@ -47,6 +60,7 @@ def test_readiness_failure_is_generic_and_can_recover(settings, caplog):
         assert password not in response.text + caplog.text
         assert client.get("/health/live").status_code == 200
         session.execute.side_effect = None
+        session.execute.return_value.scalar_one.return_value = SCHEMA_HEAD
         assert client.get("/health/ready").status_code == 200
 
 
@@ -54,7 +68,9 @@ def test_session_closes_after_failure(settings):
     app = create_app(settings)
     with TestClient(app) as client:
         session = MagicMock()
-        session.execute.side_effect = OperationalError("SELECT 1", {}, Exception("test"))
+        session.execute.side_effect = OperationalError(
+            "SELECT version_num FROM alembic_version", {}, Exception("test")
+        )
         factory = MagicMock()
         factory.return_value.__enter__.return_value = session
         app.state.session_factory = factory
