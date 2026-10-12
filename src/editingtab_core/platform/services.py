@@ -3,25 +3,30 @@
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from editingtab_core.auth import repository as auth_repository
 from editingtab_core.auth.models import InvitationRole, OrganizationInvitation, PasswordCredential
 from editingtab_core.auth.security import Passwords, token_digest, validate_password
 from editingtab_core.authorization import repository as authorization_repository
-from editingtab_core.authorization.models import Role
+from editingtab_core.authorization.models import (
+    MembershipRole,
+    PermissionDefinition,
+    Role,
+)
 from editingtab_core.authorization.onboarding import _create_owned_organization
 from editingtab_core.authorization.policy import (
     OWNER_PERMISSIONS,
     AccessError,
     Conflict,
     Inaccessible,
+    LastAdministrator,
     StorageUnavailable,
 )
 from editingtab_core.authorization.services import authorize, transaction
 from editingtab_core.identity import repository as identity_repository
 from editingtab_core.identity.errors import InvalidIdentity
-from editingtab_core.identity.models import Organization, User
+from editingtab_core.identity.models import Membership, Organization, User
 from editingtab_core.identity.normalization import clean_name, normalize_email, normalize_slug
 from editingtab_core.platform.models import (
     BootstrapState,
@@ -88,6 +93,451 @@ def _require_platform(session, actor_id):
     )
     if grant is None:
         raise AccessError()
+
+
+def _page(limit, offset):
+    if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+        raise InvalidOnboarding()
+
+
+def _account_status(user):
+    if user.deleted_at is not None:
+        return "archived"
+    return "active" if user.is_active else "inactive"
+
+
+def _membership_status(membership, organization, user):
+    if membership.deleted_at is not None:
+        return "archived"
+    if organization.deleted_at is not None:
+        return "organization_archived"
+    if not user.is_active or user.deleted_at is not None:
+        return "account_inactive"
+    return "active" if membership.is_active else "inactive"
+
+
+def _role_system_managed(role):
+    return role.normalized_name == "organization owner" or role.provisioning_kind is not None
+
+
+def _platform_role_info(session, role, organization):
+    permissions = authorization_repository.role_permission_grants(
+        session, role.organization_id, role.id
+    )
+    assignments = session.scalar(
+        select(func.count())
+        .select_from(MembershipRole)
+        .where(
+            MembershipRole.organization_id == role.organization_id,
+            MembershipRole.role_id == role.id,
+        )
+    )
+    return {
+        "id": role.id,
+        "organization_id": organization.id,
+        "organization_name": organization.name,
+        "name": role.name,
+        "scope": "organization",
+        "state": "archived" if role.deleted_at is not None else "active",
+        "system_managed": _role_system_managed(role),
+        "permissions": [
+            {"code": code, "can_grant": can_grant}
+            for code, can_grant in sorted(permissions.items())
+        ],
+        "assignment_count": assignments,
+    }
+
+
+def list_users(session, *, actor_id, limit=50, offset=0, search=None):
+    """Return a stable, bounded global identity directory without credential data."""
+    _page(limit, offset)
+    with transaction(session):
+        _require_platform(session, actor_id)
+        filters = []
+        if search and (term := search.strip().lower()):
+            filters.append(
+                or_(
+                    func.lower(User.display_name).contains(term),
+                    User.normalized_email.contains(term),
+                )
+            )
+        base = select(User).where(*filters)
+        total = session.scalar(select(func.count()).select_from(base.subquery()))
+        users = session.scalars(
+            base.order_by(User.normalized_email, User.id).limit(limit).offset(offset)
+        )
+        return {
+            "items": [
+                {
+                    "id": user.id,
+                    "email": user.email,
+                    "display_name": user.display_name,
+                    "account_status": _account_status(user),
+                    "created_at": user.created_at,
+                }
+                for user in users
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+def read_user(session, *, actor_id, user_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        user = session.get(User, user_id)
+        if user is None:
+            raise Inaccessible()
+        membership_rows = session.execute(
+            select(Membership, Organization)
+            .join(Organization, Organization.id == Membership.organization_id)
+            .where(Membership.user_id == user.id)
+            .order_by(Organization.name, Organization.id, Membership.id)
+        ).all()
+        memberships = []
+        for membership, organization in membership_rows:
+            roles = list(
+                session.scalars(
+                    select(Role)
+                    .join(
+                        MembershipRole,
+                        (MembershipRole.role_id == Role.id)
+                        & (MembershipRole.organization_id == Role.organization_id),
+                    )
+                    .where(
+                        MembershipRole.organization_id == membership.organization_id,
+                        MembershipRole.membership_id == membership.id,
+                    )
+                    .order_by(Role.normalized_name, Role.id)
+                )
+            )
+            active = _membership_status(membership, organization, user) == "active"
+            memberships.append(
+                {
+                    "id": membership.id,
+                    "organization_id": organization.id,
+                    "organization_name": organization.name,
+                    "organization_archived": organization.deleted_at is not None,
+                    "state": _membership_status(membership, organization, user),
+                    "is_owner": any(role.normalized_name == "organization owner" for role in roles),
+                    "roles": [
+                        {
+                            "id": role.id,
+                            "name": role.name,
+                            "system_managed": _role_system_managed(role),
+                        }
+                        for role in roles
+                    ],
+                    "effective_permissions": (
+                        sorted(
+                            authorization_repository.effective_permissions(
+                                session, organization.id, user.id
+                            )
+                        )
+                        if active
+                        else []
+                    ),
+                }
+            )
+        invitations = list(
+            session.scalars(
+                select(OrganizationInvitation)
+                .where(OrganizationInvitation.normalized_email == user.normalized_email)
+                .order_by(OrganizationInvitation.created_at.desc(), OrganizationInvitation.id)
+            )
+        )
+        now = session.scalar(select(func.clock_timestamp()))
+        return {
+            "id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "account_status": _account_status(user),
+            "activation_state": "activated"
+            if session.get(PasswordCredential, user.id)
+            else "pending",
+            "created_at": user.created_at,
+            "memberships": memberships,
+            "invitations": [
+                {
+                    "id": invitation.id,
+                    "organization_id": invitation.organization_id,
+                    "kind": invitation.kind,
+                    "status": (
+                        "accepted"
+                        if invitation.accepted_at is not None
+                        else "revoked"
+                        if invitation.revoked_at is not None
+                        else "expired"
+                        if invitation.expires_at <= now
+                        else "pending"
+                    ),
+                    "created_at": invitation.created_at,
+                    "expires_at": invitation.expires_at,
+                    "accepted_at": invitation.accepted_at,
+                    "revoked_at": invitation.revoked_at,
+                    "delivery_status": "adapter_required",
+                }
+                for invitation in invitations
+            ],
+        }
+
+
+def list_owner_onboarding(session, *, actor_id, limit=50, offset=0):
+    _page(limit, offset)
+    with transaction(session):
+        _require_platform(session, actor_id)
+        organizations = list(
+            session.scalars(
+                select(Organization)
+                .order_by(Organization.name, Organization.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        total = session.scalar(select(func.count()).select_from(Organization))
+        now = session.scalar(select(func.clock_timestamp()))
+        items = []
+        for organization in organizations:
+            invitation = _owner_invitation(session, organization.id)
+            owner_exists = (
+                session.scalar(
+                    select(Membership.id)
+                    .join(
+                        MembershipRole,
+                        (MembershipRole.membership_id == Membership.id)
+                        & (MembershipRole.organization_id == Membership.organization_id),
+                    )
+                    .join(
+                        Role,
+                        (Role.id == MembershipRole.role_id)
+                        & (Role.organization_id == MembershipRole.organization_id),
+                    )
+                    .join(User, User.id == Membership.user_id)
+                    .where(
+                        Membership.organization_id == organization.id,
+                        Membership.deleted_at.is_(None),
+                        Membership.is_active.is_(True),
+                        User.deleted_at.is_(None),
+                        User.is_active.is_(True),
+                        Role.deleted_at.is_(None),
+                        Role.normalized_name == "organization owner",
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            status = "unrecorded"
+            if invitation is not None:
+                status = (
+                    "accepted"
+                    if invitation.accepted_at is not None
+                    else "revoked"
+                    if invitation.revoked_at is not None
+                    else "expired"
+                    if invitation.expires_at <= now
+                    else "pending"
+                )
+            items.append(
+                {
+                    "organization_id": organization.id,
+                    "organization_name": organization.name,
+                    "organization_archived": organization.deleted_at is not None,
+                    "has_active_owner": owner_exists,
+                    "invitation_id": invitation.id if invitation else None,
+                    "owner_name": invitation.intended_display_name if invitation else None,
+                    "owner_email": invitation.normalized_email if invitation else None,
+                    "invitation_status": status,
+                    "expires_at": invitation.expires_at if invitation else None,
+                    "delivery_status": "adapter_required" if invitation else None,
+                }
+            )
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def list_platform_roles(session, *, actor_id, limit=50, offset=0, organization_id=None):
+    _page(limit, offset)
+    with transaction(session):
+        _require_platform(session, actor_id)
+        filters = [Role.organization_id == organization_id] if organization_id else []
+        base = select(Role, Organization).join(Organization).where(*filters)
+        total = session.scalar(select(func.count()).select_from(base.subquery()))
+        rows = session.execute(
+            base.order_by(Organization.name, Role.normalized_name, Role.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return {
+            "items": [
+                _platform_role_info(session, role, organization) for role, organization in rows
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+def list_platform_permissions(session, *, actor_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        definitions = session.scalars(
+            select(PermissionDefinition).order_by(
+                PermissionDefinition.module, PermissionDefinition.code
+            )
+        )
+        return [
+            {
+                "code": definition.code,
+                "module": definition.module,
+                "description": definition.description,
+                "lifecycle": definition.lifecycle,
+                "organization_assignable": definition.organization_assignable,
+            }
+            for definition in definitions
+        ]
+
+
+def archive_platform_membership(session, *, actor_id, organization_id, membership_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        organization = _organization(session, organization_id, lock=True)
+        row = session.execute(
+            select(Membership, User)
+            .join(User, User.id == Membership.user_id)
+            .where(Membership.organization_id == organization.id, Membership.id == membership_id)
+            .with_for_update()
+        ).first()
+        if row is None:
+            raise Inaccessible()
+        membership, user = row
+        if membership.deleted_at is not None:
+            return {"membership_id": membership.id, "state": "archived"}
+        assignments = list(
+            session.scalars(
+                select(MembershipRole).where(
+                    MembershipRole.organization_id == organization.id,
+                    MembershipRole.membership_id == membership.id,
+                )
+            )
+        )
+        owner_role_ids = list(
+            session.scalars(
+                select(Role.id).where(
+                    Role.organization_id == organization.id,
+                    Role.normalized_name == "organization owner",
+                )
+            )
+        )
+        removes_owner = any(assignment.role_id in owner_role_ids for assignment in assignments)
+        if removes_owner:
+            another_owner = session.scalar(
+                select(Membership.id)
+                .join(
+                    MembershipRole,
+                    (MembershipRole.membership_id == Membership.id)
+                    & (MembershipRole.organization_id == Membership.organization_id),
+                )
+                .join(User, User.id == Membership.user_id)
+                .where(
+                    Membership.organization_id == organization.id,
+                    Membership.id != membership.id,
+                    Membership.deleted_at.is_(None),
+                    Membership.is_active.is_(True),
+                    User.deleted_at.is_(None),
+                    User.is_active.is_(True),
+                    MembershipRole.role_id.in_(owner_role_ids),
+                )
+                .limit(1)
+            )
+            if another_owner is None:
+                raise LastAdministrator()
+        for assignment in assignments:
+            permissions = authorization_repository.role_permission_grants(
+                session, organization.id, assignment.role_id
+            )
+            session.delete(assignment)
+            authorization_repository.audit(
+                session,
+                organization.id,
+                actor_id,
+                "assignment.removed",
+                assignment.role_id,
+                permissions,
+                {},
+                membership.id,
+            )
+        membership.deleted_at = datetime.now(UTC)
+        membership.updated_at = datetime.now(UTC)
+        session.flush()
+        from editingtab_core.authorization.services import ensure_administrator
+
+        ensure_administrator(session, organization.id)
+        authorization_repository.member_audit(
+            session, organization.id, actor_id, "member.archived", membership.id, user.id
+        )
+        _audit(
+            session,
+            actor_id=actor_id,
+            organization_id=organization.id,
+            action="membership.archived",
+            target_id=membership.id,
+            before={"state": "active" if membership.is_active else "inactive"},
+            after={"state": "archived"},
+        )
+        return {"membership_id": membership.id, "state": "archived"}
+
+
+def restore_platform_membership(session, *, actor_id, organization_id, membership_id):
+    with transaction(session):
+        _require_platform(session, actor_id)
+        organization = _organization(session, organization_id, lock=True)
+        membership = session.scalar(
+            select(Membership)
+            .join(User, User.id == Membership.user_id)
+            .where(
+                Membership.organization_id == organization.id,
+                Membership.id == membership_id,
+                User.deleted_at.is_(None),
+                User.is_active.is_(True),
+            )
+            .with_for_update()
+        )
+        if membership is None:
+            raise Inaccessible()
+        if membership.deleted_at is not None:
+            if (
+                session.scalar(
+                    select(MembershipRole.role_id)
+                    .where(
+                        MembershipRole.organization_id == organization.id,
+                        MembershipRole.membership_id == membership.id,
+                    )
+                    .limit(1)
+                )
+                is not None
+            ):
+                raise AccessError()
+            membership.deleted_at = None
+            membership.is_active = True
+            membership.updated_at = datetime.now(UTC)
+            authorization_repository.member_audit(
+                session,
+                organization.id,
+                actor_id,
+                "member.restored",
+                membership.id,
+                membership.user_id,
+            )
+            _audit(
+                session,
+                actor_id=actor_id,
+                organization_id=organization.id,
+                action="membership.restored",
+                target_id=membership.id,
+                before={"state": "archived"},
+                after={"state": "active", "roles_restored": False},
+            )
+        return {"membership_id": membership.id, "state": "active"}
 
 
 def bootstrap_initial(session, *, passwords: Passwords, password: str, display_name: str):

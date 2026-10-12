@@ -104,6 +104,200 @@ class BookingPermissionManagerOutput(BaseModel):
     scopes: list[str]
 
 
+class PlatformUserSummaryOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    email: str
+    display_name: str
+    account_status: Literal["active", "inactive", "archived"]
+    created_at: datetime
+
+
+class PlatformRoleReferenceOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    name: str
+    system_managed: bool
+
+
+class PlatformMembershipOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    organization_id: UUID
+    organization_name: str
+    organization_archived: bool
+    state: Literal["active", "inactive", "archived", "organization_archived", "account_inactive"]
+    is_owner: bool
+    roles: list[PlatformRoleReferenceOutput]
+    effective_permissions: list[str]
+
+
+class PlatformInvitationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    organization_id: UUID
+    kind: Literal["employee", "organization_owner"]
+    status: Literal["pending", "accepted", "expired", "revoked"]
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None
+    revoked_at: datetime | None
+    delivery_status: Literal["adapter_required"]
+
+
+class PlatformUserDetailOutput(PlatformUserSummaryOutput):
+    activation_state: Literal["activated", "pending"]
+    memberships: list[PlatformMembershipOutput]
+    invitations: list[PlatformInvitationOutput]
+
+
+class PlatformUserPageOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[PlatformUserSummaryOutput]
+    total: int
+    limit: int
+    offset: int
+
+
+class OwnerOnboardingOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    organization_id: UUID
+    organization_name: str
+    organization_archived: bool
+    has_active_owner: bool
+    invitation_id: UUID | None
+    owner_name: str | None
+    owner_email: str | None
+    invitation_status: Literal["unrecorded", "pending", "accepted", "expired", "revoked"]
+    expires_at: datetime | None
+    delivery_status: Literal["adapter_required"] | None
+
+
+class OwnerOnboardingPageOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[OwnerOnboardingOutput]
+    total: int
+    limit: int
+    offset: int
+
+
+class PlatformRolePermissionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    can_grant: bool
+
+
+class PlatformRoleOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    organization_id: UUID
+    organization_name: str
+    name: str
+    scope: Literal["organization"]
+    state: Literal["active", "archived"]
+    system_managed: bool
+    permissions: list[PlatformRolePermissionOutput]
+    assignment_count: int
+
+
+class PlatformRolePageOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[PlatformRoleOutput]
+    total: int
+    limit: int
+    offset: int
+
+
+class PlatformPermissionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str
+    module: str
+    description: str
+    lifecycle: Literal["active", "deprecated"]
+    organization_assignable: bool
+
+
+class MembershipStateOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    membership_id: UUID
+    state: Literal["active", "archived"]
+
+
+@router.get("/users", response_model=PlatformUserPageOutput)
+def users(
+    session: Database,
+    actor_id: Actor,
+    limit: Limit = 50,
+    offset: Offset = 0,
+    search: Annotated[str | None, Query(max_length=254)] = None,
+):
+    return services.list_users(
+        session, actor_id=actor_id, limit=limit, offset=offset, search=search
+    )
+
+
+@router.get("/users/{user_id}", response_model=PlatformUserDetailOutput)
+def user(user_id: UUID, session: Database, actor_id: Actor):
+    return services.read_user(session, actor_id=actor_id, user_id=user_id)
+
+
+@router.get("/owner-onboarding", response_model=OwnerOnboardingPageOutput)
+def owner_onboarding(session: Database, actor_id: Actor, limit: Limit = 50, offset: Offset = 0):
+    return services.list_owner_onboarding(session, actor_id=actor_id, limit=limit, offset=offset)
+
+
+@router.get("/roles", response_model=PlatformRolePageOutput)
+def roles(
+    session: Database,
+    actor_id: Actor,
+    limit: Limit = 50,
+    offset: Offset = 0,
+    organization_id: UUID | None = None,
+):
+    return services.list_platform_roles(
+        session,
+        actor_id=actor_id,
+        limit=limit,
+        offset=offset,
+        organization_id=organization_id,
+    )
+
+
+@router.get("/permissions", response_model=list[PlatformPermissionOutput])
+def permissions(session: Database, actor_id: Actor):
+    return services.list_platform_permissions(session, actor_id=actor_id)
+
+
+@router.post(
+    "/organizations/{organization_id}/members/{membership_id}/archive",
+    response_model=MembershipStateOutput,
+)
+def archive_membership(
+    organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor
+):
+    return services.archive_platform_membership(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        membership_id=membership_id,
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/members/{membership_id}/restore",
+    response_model=MembershipStateOutput,
+)
+def restore_membership(
+    organization_id: UUID, membership_id: UUID, session: Database, actor_id: Actor
+):
+    return services.restore_platform_membership(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+        membership_id=membership_id,
+    )
+
+
 @router.get("/organizations", response_model=list[PlatformOrganizationOutput])
 def organizations(
     session: Database,
