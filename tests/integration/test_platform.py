@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -167,6 +167,131 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
     # Platform authority is not membership and cannot access tenant APIs.
     with pytest.raises(Inaccessible):
         tenant.read_organization(identity_session, organization_id=org, actor_id=setup.operator)
+
+
+def test_global_user_role_directory_and_membership_lifecycle(identity_session, setup, clients):
+    organization = onboard(identity_session, setup)
+    organization_id = organization["id"]
+    member = tenant.add_member(
+        identity_session,
+        organization_id=organization_id,
+        actor_id=setup.owner,
+        user_id=setup.ordinary,
+    )
+
+    with clients() as client:
+        cross_tenant = client.post(
+            f"/platform/organizations/{uuid4()}/members/{member['membership_id']}/archive",
+            headers={"Origin": ORIGIN},
+        )
+        assert cross_tenant.status_code == 404
+        page = client.get("/platform/users?limit=1&offset=0&search=ordinary")
+        assert page.status_code == 200
+        assert page.json()["total"] == 1
+        assert page.json()["items"][0]["email"] == "ordinary@example.test"
+        assert "password_hash" not in page.text
+        assert "token_digest" not in page.text
+
+        detail = client.get(f"/platform/users/{setup.ordinary}")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body["activation_state"] == "activated"
+        assert body["memberships"][0]["organization_id"] == str(organization_id)
+        assert body["memberships"][0]["state"] == "active"
+        assert body["memberships"][0]["effective_permissions"] == []
+        assert all("development_token" not in invitation for invitation in body["invitations"])
+
+        roles = client.get(f"/platform/roles?organization_id={organization_id}")
+        assert roles.status_code == 200
+        assert roles.json()["items"][0]["system_managed"] is True
+        assert roles.json()["items"][0]["scope"] == "organization"
+        permissions = client.get("/platform/permissions")
+        assert permissions.status_code == 200
+        assert {item["code"] for item in permissions.json()} >= OWNER_PERMISSIONS
+
+        archived = client.post(
+            f"/platform/organizations/{organization_id}/members/{member['membership_id']}/archive",
+            headers={"Origin": ORIGIN},
+        )
+        assert archived.status_code == 200 and archived.json()["state"] == "archived"
+        restored = client.post(
+            f"/platform/organizations/{organization_id}/members/{member['membership_id']}/restore",
+            headers={"Origin": ORIGIN},
+        )
+        assert restored.status_code == 200 and restored.json()["state"] == "active"
+
+    with identity_session.begin():
+        events = list(
+            identity_session.scalars(
+                select(PlatformAudit)
+                .where(PlatformAudit.target_id == member["membership_id"])
+                .order_by(PlatformAudit.created_at)
+            )
+        )
+        assert [event.action for event in events] == [
+            "membership.archived",
+            "membership.restored",
+        ]
+        assert all(event.actor_id == setup.operator for event in events)
+
+
+def test_global_directory_denies_tenant_admin_and_protects_last_owner(
+    identity_session, setup, clients
+):
+    organization = onboard(identity_session, setup)
+    organization_id = organization["id"]
+    owner_membership = tenant.list_members(
+        identity_session, organization_id=organization_id, actor_id=setup.owner
+    )[0]
+
+    with clients(email="owner@example.test") as client:
+        assert client.get("/platform/users").status_code == 403
+        assert client.get("/platform/roles").status_code == 403
+
+    with clients() as client:
+        response = client.post(
+            f"/platform/organizations/{organization_id}/members/"
+            f"{owner_membership['membership_id']}/archive",
+            headers={"Origin": ORIGIN},
+        )
+        assert response.status_code == 409
+        detail = client.get(f"/platform/users/{setup.owner}").json()
+        assert detail["memberships"][0]["state"] == "active"
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(
+                select(func.count())
+                .select_from(PlatformAudit)
+                .where(PlatformAudit.target_id == owner_membership["membership_id"])
+            )
+            == 0
+        )
+
+
+def test_owner_onboarding_distinguishes_unrecorded_from_pending(
+    identity_session, setup, clients, integration_settings
+):
+    with identity_session.begin():
+        identity_session.add(Organization(name="Unrecorded", slug="unrecorded"))
+    onboard(
+        identity_session,
+        setup,
+        name="Pending Owner",
+        slug="pending-owner",
+        owner_name="Future Owner",
+        owner_email="future-owner@example.test",
+        settings=integration_settings,
+    )
+
+    with clients() as client:
+        response = client.get("/platform/owner-onboarding?limit=100&offset=0")
+        assert response.status_code == 200
+        by_name = {item["organization_name"]: item for item in response.json()["items"]}
+        assert by_name["Unrecorded"]["invitation_status"] == "unrecorded"
+        assert by_name["Unrecorded"]["has_active_owner"] is False
+        assert by_name["Pending Owner"]["invitation_status"] == "pending"
+        assert by_name["Pending Owner"]["has_active_owner"] is False
+        assert "development_token" not in response.text
 
 
 def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle(
