@@ -7,7 +7,8 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import URL
+from pydantic_settings.exceptions import SettingsError
+from sqlalchemy import URL, make_url
 
 
 class ConfigurationError(ValueError):
@@ -29,7 +30,8 @@ class Settings(BaseSettings):
     db_port: int = Field(default=15432, ge=1, le=65535)
     db_name: str = Field(default="editingtab_core", pattern=r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
     db_username: str = Field(default="editingtab_dev", min_length=1, max_length=63)
-    db_password: SecretStr = Field(repr=False, exclude=True)
+    db_password: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    database_dsn: SecretStr | None = Field(default=None, repr=False, exclude=True)
     db_connect_timeout: int = Field(default=3, ge=2, le=10)
 
     auth_allowed_origins: tuple[str, ...] = ()
@@ -89,6 +91,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def valid_origins(self):
+        loopback_hosts = {"127.0.0.1", "localhost", "::1"}
         for origin in self.auth_allowed_origins:
             parsed = urlsplit(origin)
             if (
@@ -103,6 +106,7 @@ class Settings(BaseSettings):
                 or "*" in origin
                 or any(ord(c) <= 32 for c in origin)
                 or (self.auth_secure_cookie and parsed.scheme != "https")
+                or (self.environment == "production" and parsed.hostname in loopback_hosts)
             ):
                 raise ValueError("Use exact HTTP(S) origins; secure mode requires HTTPS.")
             _ = parsed.port
@@ -127,7 +131,9 @@ class Settings(BaseSettings):
 
     @field_validator("db_password")
     @classmethod
-    def usable_password(cls, value: SecretStr) -> SecretStr:
+    def usable_password(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
         password = value.get_secret_value()
         if (
             not password
@@ -137,7 +143,45 @@ class Settings(BaseSettings):
             raise ValueError("A nonempty database password is required")
         return value
 
+    @field_validator("database_dsn")
+    @classmethod
+    def usable_database_dsn(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
+        try:
+            url = make_url(value.get_secret_value())
+            port = url.port
+        except (TypeError, ValueError):
+            raise ValueError("Use a valid PostgreSQL connection string") from None
+        if (
+            url.drivername not in {"postgres", "postgresql", "postgresql+psycopg"}
+            or not url.username
+            or not url.password
+            or not url.host
+            or port is None
+            or not url.database
+        ):
+            raise ValueError("Use a complete PostgreSQL connection string")
+        return value
+
+    @model_validator(mode="after")
+    def one_database_credential_source(self):
+        if (self.db_password is None) == (self.database_dsn is None):
+            raise ValueError("Configure exactly one database credential source")
+        if self.environment == "production" and self.database_dsn is None:
+            required_fields = {"db_host", "db_port", "db_name", "db_username"}
+            if not required_fields.issubset(self.model_fields_set):
+                raise ValueError(
+                    "Production requires an explicit database target or connection string"
+                )
+        return self
+
     def database_url(self) -> URL:
+        if self.database_dsn is not None:
+            return make_url(self.database_dsn.get_secret_value()).set(
+                drivername="postgresql+psycopg"
+            )
+        assert self.db_password is not None
         # URL.create avoids manual quoting/interpolation, including %, @, / and #.
         return URL.create(
             "postgresql+psycopg",
@@ -152,7 +196,7 @@ class Settings(BaseSettings):
 def load_settings(*, env_file: str | None = ".env") -> Settings:
     try:
         return Settings(_env_file=env_file)
-    except (ValidationError, ValueError, OSError):
+    except (SettingsError, ValidationError, ValueError, OSError):
         # Do not propagate raw environment values or credential-bearing exceptions.
         raise ConfigurationError(
             "Invalid CORE_ configuration; check required values and bounds"

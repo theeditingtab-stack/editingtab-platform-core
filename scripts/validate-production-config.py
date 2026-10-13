@@ -10,8 +10,8 @@ def main() -> int:
         settings = load_settings(env_file=None)
         if settings.environment != "production":
             raise ConfigurationError("CORE_ENVIRONMENT must be production.")
-        if settings.auth_allowed_origins != ("https://demo.theeditingtab.com",):
-            raise ConfigurationError("Configure the exact production browser origin.")
+        if not settings.auth_allowed_origins:
+            raise ConfigurationError("Configure at least one exact HTTPS browser origin.")
         if settings.booking_service_current_digest is None:
             raise ConfigurationError("Configure the Booking service credential digest.")
         if not settings.booking_service_private_networks:

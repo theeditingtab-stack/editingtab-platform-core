@@ -45,6 +45,13 @@ def test_long_password_is_not_truncated():
 @pytest.mark.parametrize("environment", [None, "production", "development", "test"])
 def test_secure_cookie_only_disabled_in_explicit_local_mode(environment):
     kwargs = {"environment": environment} if environment else {}
+    if environment == "production":
+        kwargs.update(
+            db_host="db.internal",
+            db_port=5432,
+            db_name="editingtab_core",
+            db_username="core_app",
+        )
     settings = Settings(_env_file=None, db_password="unit-only", **kwargs)
     assert settings.auth_secure_cookie is (environment not in {"development", "test"})
     assert settings.auth_cookie_samesite == (
@@ -67,6 +74,9 @@ def test_secure_cookie_only_disabled_in_explicit_local_mode(environment):
         "https://host/",
         "http://host",
         "https://*.host",
+        "https://127.0.0.1",
+        "https://localhost",
+        "https://[::1]",
     ],
 )
 def test_production_rejects_unsafe_origins(origin):
@@ -74,6 +84,10 @@ def test_production_rejects_unsafe_origins(origin):
         Settings(
             _env_file=None,
             environment="production",
+            db_host="db.internal",
+            db_port=5432,
+            db_name="editingtab_core",
+            db_username="core_app",
             db_password="unit-only",
             auth_allowed_origins=[origin],
         )
@@ -84,6 +98,10 @@ def test_production_does_not_accept_insecure_override(monkeypatch):
     settings = Settings(
         _env_file=None,
         environment="production",
+        db_host="db.internal",
+        db_port=5432,
+        db_name="editingtab_core",
+        db_username="core_app",
         db_password="unit-only",
         auth_allowed_origins=["https://demo.example"],
     )

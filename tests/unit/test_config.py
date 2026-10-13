@@ -31,6 +31,32 @@ def test_password_required():
         Settings(_env_file=None)
 
 
+def test_managed_postgres_connection_string_is_secret_and_uses_psycopg():
+    secret = "postgresql://core_user:p%40ss@db.internal:5432/editingtab_core"
+    settings = Settings(_env_file=None, environment="production", database_dsn=secret)
+
+    url = settings.database_url()
+    assert url.drivername == "postgresql+psycopg"
+    assert url.host == "db.internal"
+    assert url.password == "p@ss"
+    assert secret not in repr(settings)
+    assert "database_dsn" not in settings.model_dump()
+
+
+def test_database_credential_sources_are_mutually_exclusive():
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            db_password="unit-only",
+            database_dsn="postgresql://user:password@db.internal:5432/editingtab_core",
+        )
+
+
+def test_production_component_database_target_must_be_explicit():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, environment="production", db_password="unit-only")
+
+
 def test_url_preserves_special_characters(settings):
     url = settings.database_url()
     assert url.password == "unit-only-P@ss:/%#'secret"
@@ -58,6 +84,16 @@ def test_validation_does_not_echo_input(monkeypatch):
     sentinel = "credential-like-invalid-value"
     monkeypatch.setenv("CORE_DB_PASSWORD", sentinel)
     monkeypatch.setenv("CORE_DB_PORT", sentinel)
+    with pytest.raises(ConfigurationError) as error:
+        load_settings(env_file=None)
+    assert sentinel not in str(error.value)
+    assert error.value.__suppress_context__ is True
+
+
+def test_malformed_complex_environment_value_is_sanitized(monkeypatch):
+    sentinel = "credential-like-invalid-origin"
+    monkeypatch.setenv("CORE_DB_PASSWORD", "test-only")
+    monkeypatch.setenv("CORE_AUTH_ALLOWED_ORIGINS", f"[{sentinel}]")
     with pytest.raises(ConfigurationError) as error:
         load_settings(env_file=None)
     assert sentinel not in str(error.value)

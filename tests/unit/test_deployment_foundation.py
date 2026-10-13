@@ -33,3 +33,10 @@ def test_secret_loader_reads_files_without_echoing_values():
     assert "CORE_BOOKING_SERVICE_CURRENT_DIGEST_FILE" in loader
     assert "set -x" not in loader
     assert 'exec "$@"' in loader
+
+
+def test_production_validator_accepts_deployment_specific_https_origin():
+    validator = read("scripts/validate-production-config.py")
+
+    assert "https://demo.theeditingtab.com" not in validator
+    assert "at least one exact HTTPS browser origin" in validator
