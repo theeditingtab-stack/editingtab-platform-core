@@ -17,6 +17,8 @@ def test_image_is_locked_non_root_and_does_not_migrate_on_startup():
     assert "COPY .env" not in dockerfile
     assert "editingtab_core.app:create_app" in dockerfile
     assert "alembic upgrade" not in dockerfile
+    assert "--proxy-headers" in dockerfile
+    assert "--forwarded-allow-ips=*" in dockerfile
 
 
 def test_migration_is_an_explicit_command():
