@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from editingtab_core.app import create_app
-from editingtab_core.auth.models import OrganizationInvitation, PasswordCredential
+from editingtab_core.auth.models import InvitationRole, OrganizationInvitation, PasswordCredential
 from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization import repository as authorization_repository
@@ -148,13 +148,26 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
         == org
     )
     roles = tenant.list_roles(identity_session, organization_id=org, actor_id=setup.owner)
-    assert {permission["code"] for permission in roles[0]["permissions"]} == OWNER_PERMISSIONS
-    assert all(permission["can_grant"] for permission in roles[0]["permissions"])
+    roles_by_name = {role["name"]: role for role in roles}
+    assert set(roles_by_name) == {"Organization owner", "Booking administrator"}
+    assert {
+        permission["code"] for permission in roles_by_name["Organization owner"]["permissions"]
+    } == OWNER_PERMISSIONS
+    assert all(
+        permission["can_grant"] for permission in roles_by_name["Organization owner"]["permissions"]
+    )
+    assert {
+        permission["code"] for permission in roles_by_name["Booking administrator"]["permissions"]
+    } == BOOKING_PERMISSIONS
+    assert not any(
+        permission["can_grant"]
+        for permission in roles_by_name["Booking administrator"]["permissions"]
+    )
     with identity_session.begin():
         audits = identity_session.scalars(
             select(RoleAudit).where(RoleAudit.organization_id == org)
         ).all()
-        assert len(audits) == 2 and all(row.actor_id == setup.operator for row in audits)
+        assert len(audits) == 4 and all(row.actor_id == setup.operator for row in audits)
         audit = identity_session.scalar(
             select(PlatformAudit).where(PlatformAudit.organization_id == org)
         )
@@ -164,6 +177,15 @@ def test_atomic_onboarding_owner_permissions_and_actual_auditor(identity_session
             "enabled_modules": ["booking"],
         }
         assert audit.target_id == org and audit.created_at.tzinfo is not None
+        assert (
+            identity_session.scalar(
+                select(PlatformAdminGrant.id).where(
+                    PlatformAdminGrant.user_id == setup.owner,
+                    PlatformAdminGrant.revoked_at.is_(None),
+                )
+            )
+            is None
+        )
     # Platform authority is not membership and cannot access tenant APIs.
     with pytest.raises(Inaccessible):
         tenant.read_organization(identity_session, organization_id=org, actor_id=setup.operator)
@@ -313,6 +335,15 @@ def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle
         body = created.json()
         assert body["owner"]["status"] == "pending"
         old_token = body["owner"]["development_token"]
+        with identity_session.begin():
+            first_role_ids = frozenset(
+                identity_session.scalars(
+                    select(InvitationRole.role_id).where(
+                        InvitationRole.invitation_id == UUID(body["owner"]["invitation_id"])
+                    )
+                )
+            )
+            assert len(first_role_ids) == 2
         resent = client.post(
             f"/platform/organizations/{body['id']}/owner-invitation/resend",
             headers={"Origin": ORIGIN},
@@ -320,6 +351,15 @@ def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle
         assert resent.status_code == 200
         token = resent.json()["development_token"]
         assert token != old_token
+        with identity_session.begin():
+            replacement_role_ids = frozenset(
+                identity_session.scalars(
+                    select(InvitationRole.role_id).where(
+                        InvitationRole.invitation_id == UUID(resent.json()["invitation_id"])
+                    )
+                )
+            )
+            assert replacement_role_ids == first_role_ids
         assert (
             client.post(
                 "/auth/invitations/accept",
@@ -357,6 +397,29 @@ def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle
         )
         detail = client.get(f"/platform/organizations/{body['id']}")
         assert detail.json()["owner"]["status"] == "active"
+        with identity_session.begin():
+            membership_id = identity_session.scalar(
+                select(Membership.id)
+                .join(User, User.id == Membership.user_id)
+                .where(
+                    Membership.organization_id == UUID(body["id"]),
+                    User.normalized_email == "new-owner@example.test",
+                )
+            )
+            assigned_roles = authorization_repository.membership_roles(
+                identity_session, UUID(body["id"]), membership_id
+            )
+            assert {role.name for role in assigned_roles} == {
+                "Organization owner",
+                "Booking administrator",
+            }
+            booking_role = next(
+                role for role in assigned_roles if role.name == "Booking administrator"
+            )
+            grants = authorization_repository.role_permission_grants(
+                identity_session, UUID(body["id"]), booking_role.id
+            )
+            assert grants == dict.fromkeys(BOOKING_PERMISSIONS, False)
 
         archived = client.post(
             f"/platform/organizations/{body['id']}/archive", headers={"Origin": ORIGIN}
@@ -386,6 +449,72 @@ def test_platform_onboards_new_owner_through_single_use_activation_and_lifecycle
             )
         )
         assert invitation.accepted_at is not None
+
+
+def test_booking_disabled_onboarding_does_not_create_booking_role(
+    identity_session, setup, integration_settings
+):
+    existing = onboard(identity_session, setup, enabled_modules=[])
+    invited, _ = onboard(
+        identity_session,
+        setup,
+        name="No Booking Invitation",
+        slug="no-booking-invitation",
+        owner_name="Future Owner",
+        owner_email="future-no-booking@example.test",
+        enabled_modules=[],
+        settings=integration_settings,
+    )
+    with identity_session.begin():
+        for organization_id in (existing["id"], invited["id"]):
+            assert (
+                identity_session.scalar(
+                    select(Role.id).where(
+                        Role.organization_id == organization_id,
+                        Role.provisioning_kind == "booking_inventory",
+                    )
+                )
+                is None
+            )
+
+
+def test_booking_role_failure_rolls_back_onboarding(identity_session, setup):
+    before = counts(identity_session)
+    with (
+        patch(
+            "editingtab_core.platform.booking_permissions.assign_booking_administrator_role",
+            side_effect=StorageUnavailable(),
+        ),
+        pytest.raises(StorageUnavailable),
+    ):
+        onboard(identity_session, setup)
+    assert counts(identity_session) == before
+
+
+def test_invited_booking_role_failure_rolls_back_onboarding(
+    identity_session, setup, integration_settings
+):
+    before = counts(identity_session)
+    with (
+        patch(
+            "editingtab_core.platform.booking_permissions.ensure_booking_administrator_role",
+            side_effect=StorageUnavailable(),
+        ),
+        pytest.raises(StorageUnavailable),
+    ):
+        onboard(
+            identity_session,
+            setup,
+            owner_name="Future Owner",
+            owner_email="future-owner@example.test",
+            settings=integration_settings,
+        )
+    assert counts(identity_session) == before
+    with identity_session.begin():
+        assert (
+            identity_session.scalar(select(Organization.id).where(Organization.slug == "client"))
+            is None
+        )
 
 
 def test_onboarded_owner_can_delegate_company_administration_without_platform_grants(

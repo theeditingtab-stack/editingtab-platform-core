@@ -72,8 +72,15 @@ def manager_env(identity_session, integration_settings):
         name="Manager Lifecycle",
         slug="manager-lifecycle",
         owner_email="manager-owner@example.test",
-        enabled_modules=["booking"],
+        enabled_modules=[],
     )["id"]
+    platform.set_entitlement(
+        identity_session,
+        actor_id=users["operator"],
+        organization_id=organization_id,
+        module_code="booking",
+        enabled=True,
+    )
     second_membership = identity.add_membership(
         identity_session, organization_id=organization_id, user_id=users["second"]
     )

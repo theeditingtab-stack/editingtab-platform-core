@@ -137,8 +137,15 @@ Arbitrary custom roles are never modified. A marked role with unrelated permissi
 or tenant-renamed marked role, or a conflicting reserved name fails closed. Matching reruns are
 idempotent. An explicit authorized rerun may restore missing reviewed Booking permissions and may
 evolve the legacy dedicated `Booking inventory administrator` name to `Booking administrator`;
-the permission/name transition is audited. Nothing is regranted at startup, entitlement enable,
-or migration time.
+the permission/name transition is audited.
+
+Organization onboarding reuses this same protected-role construction. When Booking is enabled in
+the onboarding request, an existing owner receives the separate owner and Booking role assignments
+in the onboarding transaction. For an invited owner, both role IDs are recorded on the invitation
+and assigned atomically at acceptance. Booking-disabled onboarding creates no Booking role. Nothing
+is regranted at startup, later entitlement enable, or migration time, and no existing organization
+is backfilled automatically. The explicit provisioning endpoint above remains available for
+reviewed remediation and later administrator assignment.
 
 Because all provisioned Booking permissions have `can_grant=false`, possessing the role does not
 allow the recipient to delegate those permissions. This preserves CORE-AUTH-002's separation of

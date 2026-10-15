@@ -73,8 +73,15 @@ def env(identity_session, integration_settings):
         name="Client",
         slug="client",
         owner_email="owner@example.test",
-        enabled_modules=["booking"],
+        enabled_modules=[],
     )["id"]
+    platform.set_entitlement(
+        s,
+        actor_id=ids["operator"],
+        organization_id=org,
+        module_code="booking",
+        enabled=True,
+    )
     ordinary_member = identity.add_membership(s, organization_id=org, user_id=ids["ordinary"])
     with s.begin():
         member = s.scalar(
@@ -313,6 +320,62 @@ def test_permission_entitlement_and_revocation_without_relogin(identity_session,
         grant(identity_session, env)
         auth.logout(identity_session, env.tokens["owner"])
         error(request(client, env), 401, "invalid_user_session")
+
+
+def test_invited_booking_owner_can_authorize_dashboard_reads(
+    identity_session, env, clients, integration_settings
+):
+    organization, invitation_token = platform.onboard(
+        identity_session,
+        actor_id=env.operator,
+        name="Invited Booking Owner",
+        slug="invited-booking-owner",
+        owner_name="Invited Owner",
+        owner_email="invited-booking-owner@example.test",
+        enabled_modules=["booking"],
+        settings=integration_settings,
+    )
+    accepted = auth.accept_invitation(
+        identity_session,
+        passwords=env.passwords,
+        token=invitation_token,
+        email="invited-booking-owner@example.test",
+        password=PASSWORD,
+    )
+    session_token = auth.login(
+        identity_session,
+        settings=integration_settings,
+        passwords=env.passwords,
+        email="invited-booking-owner@example.test",
+        password=PASSWORD,
+        source="127.0.0.2",
+    )
+
+    with clients() as client:
+        for permission in ("booking.inventory.read", "booking.reservations.read"):
+            response = request(
+                client,
+                env,
+                token=session_token,
+                body={"organization_id": str(organization["id"]), "permission": permission},
+            )
+            assert response.status_code == 200
+            assert response.json()["membership_id"] == str(accepted["membership_id"])
+
+    with identity_session.begin():
+        roles = repo.membership_roles(
+            identity_session,
+            organization["id"],
+            accepted["membership_id"],
+        )
+        assert {role.name for role in roles} == {
+            "Organization owner",
+            "Booking administrator",
+        }
+        booking_role = next(role for role in roles if role.name == "Booking administrator")
+        assert repo.role_permission_grants(
+            identity_session, organization["id"], booking_role.id
+        ) == dict.fromkeys(BOOKING_PERMISSIONS, False)
 
 
 @pytest.mark.parametrize("permission", sorted(BOOKING_PERMISSIONS))
@@ -774,9 +837,10 @@ def test_same_user_multi_org_authorization_is_independent(identity_session, env,
         actor_id=env.operator,
         name="Second client",
         slug="second-client",
-        owner_email="owner@example.test",
+        owner_email="ordinary@example.test",
         enabled_modules=["booking"],
     )["id"]
+    identity.add_membership(identity_session, organization_id=other, user_id=env.owner)
     with identity_session.begin():
         other_member = identity_session.scalar(
             select(Membership.id).where(
@@ -795,11 +859,19 @@ def test_same_user_multi_org_authorization_is_independent(identity_session, env,
             403,
             "permission_denied",
         )
-        provision(
+        role = access.create_role(
             identity_session,
-            actor_id=env.operator,
             organization_id=other,
+            actor_id=env.ordinary,
+            name="Second client Booking reader",
+            codes=[READ],
+        )
+        access.change_assignment(
+            identity_session,
+            organization_id=other,
+            actor_id=env.ordinary,
             membership_id=other_member,
+            role_id=role["id"],
         )
         response = request(
             client,

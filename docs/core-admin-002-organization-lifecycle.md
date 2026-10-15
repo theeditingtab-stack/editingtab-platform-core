@@ -6,6 +6,13 @@ the selected module entitlements. The same transaction creates the organization,
 permissions, entitlement rows, owner invitation, and audit records. A failure rolls back all rows;
 a conflicting slug changes nothing.
 
+When Booking is enabled during onboarding, the same transaction also creates the existing
+protected `Booking administrator` role. Existing owners receive both role assignments immediately;
+invited owners receive both role intents and acquire both assignments atomically at acceptance.
+The roles remain separate, every protected Booking permission has `can_grant=false`, and no platform
+authority is granted. Booking-disabled onboarding creates no Booking role. Enabling Booking later
+does not backfill authority; the existing explicit platform provisioning operation remains required.
+
 The invitation is opaque, single-use, expiring, and stored only as a SHA-256 digest. Acceptance at
 `POST /auth/invitations/accept` proves mailbox-token possession, creates the global identity and
 Argon2id password credential when needed, assigns the owner membership, and consumes the token in

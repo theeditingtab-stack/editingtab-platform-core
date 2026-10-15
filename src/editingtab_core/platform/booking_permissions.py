@@ -26,6 +26,95 @@ LEGACY_ROLE_NAME = "Booking inventory administrator"
 KIND = "booking_inventory"
 
 
+def ensure_booking_administrator_role(session, *, actor_id, organization_id):
+    """Create or repair the protected role inside a caller-owned transaction."""
+    designated = session.scalar(
+        select(Role)
+        .where(
+            Role.organization_id == organization_id,
+            Role.provisioning_kind == KIND,
+        )
+        .execution_options(populate_existing=True)
+    )
+    named = session.scalar(
+        select(Role.id).where(
+            Role.organization_id == organization_id,
+            Role.normalized_name == ROLE_NAME.lower(),
+        )
+    )
+    renamed = False
+    if designated is None:
+        if named is not None:
+            raise Conflict()
+        designated = Role(
+            organization_id=organization_id,
+            name=ROLE_NAME,
+            normalized_name=ROLE_NAME.lower(),
+            provisioning_kind=KIND,
+        )
+        session.add(designated)
+        session.flush()
+    elif designated.deleted_at is not None:
+        raise Conflict()
+    elif designated.name == LEGACY_ROLE_NAME:
+        if designated.normalized_name != LEGACY_ROLE_NAME.lower() or named is not None:
+            raise Conflict()
+        designated.name = ROLE_NAME
+        designated.normalized_name = ROLE_NAME.lower()
+        designated.updated_at = datetime.now(UTC)
+        renamed = True
+    elif designated.name != ROLE_NAME or named != designated.id:
+        raise Conflict()
+    before = repo.role_permission_grants(session, organization_id, designated.id)
+    # Never remove unrelated privileges or take over a tenant-repurposed role.
+    if not before.keys() <= BOOKING_PERMISSIONS:
+        raise Conflict()
+    after = dict.fromkeys(BOOKING_PERMISSIONS, False)
+    if before != after:
+        designated.updated_at = datetime.now(UTC)
+        repo.replace_permissions(session, organization_id, designated.id, after)
+        repo.audit(
+            session,
+            organization_id,
+            actor_id,
+            "booking.role.provisioned",
+            designated.id,
+            before,
+            after,
+        )
+    return designated, before, after, renamed
+
+
+def assign_booking_administrator_role(session, *, actor_id, organization_id, membership_id):
+    """Assign the protected role inside a caller-owned authorized transaction."""
+    designated, before, after, renamed = ensure_booking_administrator_role(
+        session,
+        actor_id=actor_id,
+        organization_id=organization_id,
+    )
+    assignment = session.get(MembershipRole, (organization_id, membership_id, designated.id))
+    was_assigned = assignment is not None
+    if not was_assigned:
+        session.add(
+            MembershipRole(
+                organization_id=organization_id,
+                membership_id=membership_id,
+                role_id=designated.id,
+            )
+        )
+        repo.audit(
+            session,
+            organization_id,
+            actor_id,
+            "assignment.added",
+            designated.id,
+            {},
+            after,
+            membership_id,
+        )
+    return designated, before, after, renamed, was_assigned
+
+
 def provision(session, *, actor_id, organization_id, membership_id):
     with transaction(session):
         _require_platform(session, actor_id)
@@ -46,80 +135,12 @@ def provision(session, *, actor_id, organization_id, membership_id):
         if member is None:
             raise Inaccessible()
         authorize(session, organization_id, member.user_id, ROLE_ASSIGN)
-        designated = session.scalar(
-            select(Role)
-            .where(
-                Role.organization_id == organization_id,
-                Role.provisioning_kind == KIND,
-            )
-            .execution_options(populate_existing=True)
+        designated, before, after, renamed, was_assigned = assign_booking_administrator_role(
+            session,
+            actor_id=actor_id,
+            organization_id=organization_id,
+            membership_id=membership_id,
         )
-        named = session.scalar(
-            select(Role.id).where(
-                Role.organization_id == organization_id,
-                Role.normalized_name == ROLE_NAME.lower(),
-            )
-        )
-        renamed = False
-        if designated is None:
-            if named is not None:
-                raise Conflict()
-            designated = Role(
-                organization_id=organization_id,
-                name=ROLE_NAME,
-                normalized_name=ROLE_NAME.lower(),
-                provisioning_kind=KIND,
-            )
-            session.add(designated)
-            session.flush()
-        elif designated.deleted_at is not None:
-            raise Conflict()
-        elif designated.name == LEGACY_ROLE_NAME:
-            if designated.normalized_name != LEGACY_ROLE_NAME.lower() or named is not None:
-                raise Conflict()
-            designated.name = ROLE_NAME
-            designated.normalized_name = ROLE_NAME.lower()
-            designated.updated_at = datetime.now(UTC)
-            renamed = True
-        elif designated.name != ROLE_NAME or named != designated.id:
-            raise Conflict()
-        before = repo.role_permission_grants(session, organization_id, designated.id)
-        # Never remove unrelated privileges or take over a tenant-repurposed role.
-        if not before.keys() <= BOOKING_PERMISSIONS:
-            raise Conflict()
-        assignment = session.get(MembershipRole, (organization_id, membership_id, designated.id))
-        was_assigned = assignment is not None
-        after = dict.fromkeys(BOOKING_PERMISSIONS, False)
-        if before != after:
-            designated.updated_at = datetime.now(UTC)
-            repo.replace_permissions(session, organization_id, designated.id, after)
-            repo.audit(
-                session,
-                organization_id,
-                actor_id,
-                "booking.role.provisioned",
-                designated.id,
-                before,
-                after,
-            )
-        if not was_assigned:
-            session.add(
-                MembershipRole(
-                    organization_id=organization_id,
-                    membership_id=membership_id,
-                    role_id=designated.id,
-                )
-            )
-            repo.audit(
-                session,
-                organization_id,
-                actor_id,
-                "assignment.added",
-                designated.id,
-                {},
-                after,
-                membership_id,
-            )
         if before != after or not was_assigned or renamed:
             audit_before = {
                 "permissions": repo.permission_state(before),

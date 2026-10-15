@@ -788,7 +788,8 @@ def read_organization(session, *, actor_id, organization_id):
         return _detail(session, org)
 
 
-def _issue_owner_invitation(session, *, settings, org, actor_id, owner_name, owner_email, role_id):
+def _issue_owner_invitation(session, *, settings, org, actor_id, owner_name, owner_email, role_ids):
+    role_ids = tuple(role_ids)
     token = secrets.token_urlsafe(32)
     now = session.scalar(select(func.clock_timestamp()))
     invitation = OrganizationInvitation(
@@ -803,12 +804,13 @@ def _issue_owner_invitation(session, *, settings, org, actor_id, owner_name, own
     )
     session.add(invitation)
     session.flush()
-    session.add(
+    session.add_all(
         InvitationRole(
             organization_id=org.id,
             invitation_id=invitation.id,
             role_id=role_id,
         )
+        for role_id in role_ids
     )
     auth_repository.audit(
         session,
@@ -816,7 +818,10 @@ def _issue_owner_invitation(session, *, settings, org, actor_id, owner_name, own
         actor_id=actor_id,
         organization_id=org.id,
         target_id=invitation.id,
-        details={"purpose": "organization_owner", "role_ids": [str(role_id)]},
+        details={
+            "purpose": "organization_owner",
+            "role_ids": [str(role_id) for role_id in role_ids],
+        },
     )
     return invitation, token
 
@@ -872,6 +877,25 @@ def onboard(
                     session.add(
                         ModuleEntitlement(organization_id=org.id, module_code=code, enabled=True)
                     )
+                if "booking" in modules:
+                    from editingtab_core.platform.booking_permissions import (
+                        assign_booking_administrator_role,
+                    )
+
+                    membership_id = session.scalar(
+                        select(Membership.id).where(
+                            Membership.organization_id == org.id,
+                            Membership.user_id == owner_id,
+                        )
+                    )
+                    if membership_id is None:
+                        raise StorageUnavailable()
+                    assign_booking_administrator_role(
+                        session,
+                        actor_id=actor_id,
+                        organization_id=org.id,
+                        membership_id=membership_id,
+                    )
                 _audit(
                     session,
                     actor_id=actor_id,
@@ -897,10 +921,22 @@ def onboard(
             authorization_repository.audit(
                 session, org.id, actor_id, "role.bootstrapped", role.id, {}, permissions
             )
+            invitation_role_ids = [role.id]
             for code in sorted(modules):
                 session.add(
                     ModuleEntitlement(organization_id=org.id, module_code=code, enabled=True)
                 )
+            if "booking" in modules:
+                from editingtab_core.platform.booking_permissions import (
+                    ensure_booking_administrator_role,
+                )
+
+                booking_role, _, _, _ = ensure_booking_administrator_role(
+                    session,
+                    actor_id=actor_id,
+                    organization_id=org.id,
+                )
+                invitation_role_ids.append(booking_role.id)
             invitation, token = _issue_owner_invitation(
                 session,
                 settings=settings,
@@ -908,7 +944,7 @@ def onboard(
                 actor_id=actor_id,
                 owner_name=owner_name,
                 owner_email=normalized,
-                role_id=role.id,
+                role_ids=invitation_role_ids,
             )
             _audit(
                 session,
@@ -936,10 +972,14 @@ def resend_owner_invitation(session, *, settings, actor_id, organization_id):
         if previous is None or previous.accepted_at is not None:
             raise Conflict()
         previous.revoked_at = session.scalar(select(func.clock_timestamp()))
-        role_id = session.scalar(
-            select(InvitationRole.role_id).where(InvitationRole.invitation_id == previous.id)
+        role_ids = list(
+            session.scalars(
+                select(InvitationRole.role_id)
+                .where(InvitationRole.invitation_id == previous.id)
+                .order_by(InvitationRole.role_id)
+            )
         )
-        if role_id is None:
+        if not role_ids:
             raise StorageUnavailable()
         auth_repository.audit(
             session,
@@ -956,7 +996,7 @@ def resend_owner_invitation(session, *, settings, actor_id, organization_id):
             actor_id=actor_id,
             owner_name=previous.intended_display_name,
             owner_email=previous.normalized_email,
-            role_id=role_id,
+            role_ids=role_ids,
         )
         _audit(
             session,
