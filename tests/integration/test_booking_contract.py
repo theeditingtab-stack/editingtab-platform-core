@@ -630,16 +630,76 @@ def test_provisioning_idempotent_audit_and_bounded_tenant_delegation(identity_se
         )
 
 
-def test_tenant_cannot_unassign_platform_provisioned_booking_administrator(identity_session, env):
+def test_tenant_cannot_assign_or_unassign_platform_provisioned_booking_administrator(
+    identity_session, env
+):
     role_id = grant(identity_session, env)["role_id"]
-    with pytest.raises(ProtectedRole):
-        access.change_assignment(
-            identity_session,
-            organization_id=env.org,
-            actor_id=env.owner,
-            membership_id=env.member,
-            role_id=role_id,
-            remove=True,
+    for membership_id, remove in ((env.ordinary_member, False), (env.member, True)):
+        with pytest.raises(ProtectedRole):
+            access.change_assignment(
+                identity_session,
+                organization_id=env.org,
+                actor_id=env.owner,
+                membership_id=membership_id,
+                role_id=role_id,
+                remove=remove,
+            )
+
+
+def test_role_contract_exposes_tenant_assignability_and_stable_protected_error(
+    identity_session, env, clients
+):
+    role_id = grant(identity_session, env)["role_id"]
+    root = f"/organizations/{env.org}"
+    with clients() as client:
+        client.cookies.set(COOKIE_NAME, env.tokens["owner"])
+        roles = {item["name"]: item for item in client.get(root + "/roles").json()}
+        assert roles["Organization owner"]["tenant_assignable"] is True
+        assert roles[ROLE_NAME]["tenant_assignable"] is False
+
+        assignment = root + f"/members/{env.ordinary_member}/roles/{role_id}"
+        response = client.put(assignment, headers={"Origin": ORIGIN})
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "System-managed roles cannot be changed through organization administration.",
+            "code": "protected_role",
+        }
+
+        removal = root + f"/members/{env.member}/roles/{role_id}"
+        response = client.delete(removal, headers={"Origin": ORIGIN})
+        assert response.status_code == 409
+        assert response.json()["code"] == "protected_role"
+
+
+def test_owner_can_assign_use_only_safari_staff_role(identity_session, env):
+    grant(identity_session, env)
+    permissions = {"booking.inventory.read": False, "booking.reservations.read": False}
+    with identity_session.begin():
+        assert permissions.keys() <= repo.effective_permission_management_authority(
+            identity_session, env.org, env.owner
+        )
+        assert not permissions.keys() <= repo.effective_grant_authority(
+            identity_session, env.org, env.owner
+        )
+
+    role = access.create_role(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        name="Safari staff",
+        permissions=permissions,
+    )
+    assert role["tenant_assignable"] is True
+    access.change_assignment(
+        identity_session,
+        organization_id=env.org,
+        actor_id=env.owner,
+        membership_id=env.ordinary_member,
+        role_id=role["id"],
+    )
+    with identity_session.begin():
+        assert permissions.keys() <= repo.effective_permissions(
+            identity_session, env.org, env.ordinary
         )
 
 

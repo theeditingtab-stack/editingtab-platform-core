@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from editingtab_core.auth.http import InvitationOutput
 from editingtab_core.authorization.http import PermissionGrantInput, RoleInput
-from editingtab_core.authorization.services import _system_managed
+from editingtab_core.authorization.services import _system_managed, _tenant_assignable
 from editingtab_core.platform.http import (
     BookingPermissionManagerInput,
     BookingPermissionManagerOutput,
@@ -14,15 +14,18 @@ from editingtab_core.platform.http import (
 
 
 def test_system_role_classification_uses_existing_role_identities():
-    assert _system_managed(
-        SimpleNamespace(normalized_name="organization owner", provisioning_kind=None)
+    owner = SimpleNamespace(normalized_name="organization owner", provisioning_kind=None)
+    booking = SimpleNamespace(
+        normalized_name="booking administrator", provisioning_kind="booking_inventory"
     )
-    assert _system_managed(
-        SimpleNamespace(
-            normalized_name="booking administrator", provisioning_kind="booking_inventory"
-        )
-    )
-    assert not _system_managed(SimpleNamespace(normalized_name="custom", provisioning_kind=None))
+    custom = SimpleNamespace(normalized_name="custom", provisioning_kind=None)
+
+    assert _system_managed(owner)
+    assert _tenant_assignable(owner)
+    assert _system_managed(booking)
+    assert not _tenant_assignable(booking)
+    assert not _system_managed(custom)
+    assert _tenant_assignable(custom)
 
 
 def test_admin_inputs_are_strict_and_reject_ambiguous_permissions():

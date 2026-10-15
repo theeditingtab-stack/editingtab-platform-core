@@ -928,6 +928,7 @@ def test_member_read_contract_requires_permission_and_is_non_disclosing(
             {
                 "id": reader,
                 "name": "Member reader",
+                "tenant_assignable": True,
                 "permissions": [{"code": "core.members.read", "can_grant": False}],
             }
         ],

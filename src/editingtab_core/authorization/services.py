@@ -98,10 +98,14 @@ def _custom_role(role):
     return role
 
 
+def _tenant_assignable(role):
+    return role.provisioning_kind is None
+
+
 def _tenant_assignable_role(role):
     # The bootstrap owner role is intentionally assignable by another recovery-capable
     # administrator. Provisioned roles remain exclusively controlled by trusted platform paths.
-    if role.provisioning_kind is not None:
+    if not _tenant_assignable(role):
         raise ProtectedRole()
     return role
 
@@ -151,6 +155,7 @@ def _role_info(session, role):
     return {
         "id": role.id,
         "name": role.name,
+        "tenant_assignable": _tenant_assignable(role),
         "permissions": repo.permission_state(
             repo.role_permission_grants(session, role.organization_id, role.id)
         ),

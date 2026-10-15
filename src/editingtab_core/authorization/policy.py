@@ -62,6 +62,7 @@ class LastAdministrator(Conflict):
 
 
 class ProtectedRole(LastAdministrator):
+    code = "protected_role"
     message = "System-managed roles cannot be changed through organization administration."
 
 

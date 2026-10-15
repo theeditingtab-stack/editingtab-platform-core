@@ -34,7 +34,7 @@ session tokens, invitation digests, or platform-grant rows.
 | `GET /organizations/{org}/invitations` | `core.members.manage` | List invitation lifecycle metadata; paginated and token-free. |
 | `DELETE /organizations/{org}/invitations/{invitation}` | `core.members.manage` | Revoke a pending same-organization invitation. |
 | `GET /organizations/{org}/permissions` | `core.roles.read` | List active organization-assignable registry entries. |
-| `GET /organizations/{org}/roles` | `core.roles.read` | List active roles and their permission/grant entries; paginated. |
+| `GET /organizations/{org}/roles` | `core.roles.read` | List active roles, their permission/grant entries, and additive `tenant_assignable` policy metadata; paginated. |
 | `GET /organizations/{org}/roles/archived` | `core.roles.read` | List archived roles available for inspection or restoration; paginated. |
 | `GET /organizations/{org}/roles/{role}` | `core.roles.read` | Inspect active or archived role state and system-managed status. |
 | `POST /organizations/{org}/roles` | `core.roles.create` | Create a custom role within the actor's grant ceiling. |
@@ -46,6 +46,8 @@ session tokens, invitation digests, or platform-grant rows.
 | `DELETE /organizations/{org}/roles/{role}/permissions/{code}` | `core.roles.update` | Revoke one permission. |
 | `PUT /organizations/{org}/members/{membership}/roles/{role}` | `core.roles.assign` | Assign an allowed active role idempotently. |
 | `DELETE /organizations/{org}/members/{membership}/roles/{role}` | `core.roles.assign` | Revoke an allowed assignment. |
+
+Platform-provisioned roles return `tenant_assignable: false`; the bootstrap Organization owner role and ordinary custom roles return `true`. Tenant assignment and removal requests for a protected role continue to return HTTP 409 with the stable `protected_role` code and a safe detail message.
 
 Invitation acceptance remains `POST /auth/invitations/accept` and reuses the existing global
 identity and credential lifecycle. Production invitation creation does not serialize the raw

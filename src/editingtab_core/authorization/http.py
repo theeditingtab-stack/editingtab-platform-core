@@ -56,6 +56,7 @@ class RoleOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID
     name: str
+    tenant_assignable: bool
     permissions: list[RolePermissionOutput]
 
 

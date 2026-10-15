@@ -74,7 +74,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(AccessError)
     async def organization_error(request, error):
-        return JSONResponse(status_code=error.status, content={"detail": error.message})
+        content = {"detail": error.message}
+        if code := getattr(error, "code", None):
+            content["code"] = code
+        return JSONResponse(status_code=error.status, content=content)
 
     @app.exception_handler(AuthenticationError)
     async def authentication_error(request, error):
