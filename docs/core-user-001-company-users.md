@@ -34,6 +34,10 @@ without one, an administrator can create the pending invitation but Core does no
 
 ## Initial platform administrator
 
+> CORE-SETUP-001 adds the preferred token-authenticated first-time web flow and selectable initial
+> email. See [first-time web setup](core-setup-001-first-time-web-setup.md). The protected-shell
+> command below remains supported for compatibility and emergency operations.
+
 The designated address is fixed as `editingtab.dev@gmail.com`. Platform authority is a
 `PlatformAdminGrant`, not an organization membership or role. The bootstrap command is never called
 by application startup, migrations, or HTTP.
@@ -72,9 +76,9 @@ uv run --locked python -m editingtab_core.platform.recover
 ```
 
 It requires a different exact confirmation, hidden password entry and an already bootstrapped,
-active, unarchived designated identity. It resets that credential, revokes every existing session,
-restores or recreates only that identity's platform grant, and records both platform and security
-audit entries. It will not silently reactivate or recreate a disabled/deleted identity.
+active, unarchived recorded initial identity. It resets that credential, revokes every existing
+session, restores or recreates only that identity's platform grant, and records both platform and
+security audit entries. It will not silently reactivate or recreate a disabled/deleted identity.
 
 Tenant owners and administrators have no route or permission code that creates, assigns, restores,
 or revokes platform authority. The permission registry accepts organization-assignable definitions

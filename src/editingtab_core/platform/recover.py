@@ -10,7 +10,7 @@ from editingtab_core.auth.security import Passwords
 from editingtab_core.authorization.policy import AccessError
 from editingtab_core.config import load_settings
 from editingtab_core.database import build_engine
-from editingtab_core.platform.services import PLATFORM_ADMIN_EMAIL, recover_platform_admin
+from editingtab_core.platform.services import recover_platform_admin
 
 CONFIRMATION = "RECOVER PLATFORM ADMIN"
 
@@ -24,7 +24,9 @@ def main():
         if not sys.stdin.isatty():
             print("Interactive operator confirmation required.", file=sys.stderr)
             return 1
-        print(f"This resets access only for {PLATFORM_ADMIN_EMAIL} and revokes its sessions.")
+        print(
+            "This resets access only for the recorded initial administrator and revokes sessions."
+        )
         if input(f"Type {CONFIRMATION}: ") != CONFIRMATION:
             print("Not confirmed; nothing changed.")
             return 1

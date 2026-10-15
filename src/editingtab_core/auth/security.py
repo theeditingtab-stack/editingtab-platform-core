@@ -25,6 +25,10 @@ class LoginThrottled(Exception):
     """A temporary rate limit, independent of account existence."""
 
 
+class SetupThrottled(LoginThrottled):
+    """A temporary initial-setup rate limit."""
+
+
 class CredentialConflict(Exception):
     """Provisioning must never replace existing credentials."""
 

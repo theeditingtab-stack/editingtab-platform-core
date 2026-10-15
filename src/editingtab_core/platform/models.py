@@ -35,6 +35,9 @@ class BootstrapState(Base):
     __table_args__ = (CheckConstraint("id = 1", name="ck_platform_bootstrap_singleton"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    administrator_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("core_users.id", ondelete="RESTRICT")
+    )
 
 
 class ModuleEntitlement(Base):

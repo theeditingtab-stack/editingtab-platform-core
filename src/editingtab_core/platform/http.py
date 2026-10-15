@@ -5,13 +5,33 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictStr, model_validator
 
 from editingtab_core.authorization.http import Actor, Database, Limit, Offset
 from editingtab_core.platform import services
 
 router = APIRouter(prefix="/platform")
 tenant_router = APIRouter(prefix="/organizations")
+
+
+class SetupStatusOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    setup_required: bool
+
+
+class InitialSetupInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    email: str = Field(min_length=1, max_length=254)
+    password: SecretStr = Field(min_length=15, max_length=1024, repr=False, exclude=True)
+    password_confirmation: SecretStr = Field(
+        min_length=15, max_length=1024, repr=False, exclude=True
+    )
+    setup_token: SecretStr = Field(min_length=43, max_length=43, repr=False, exclude=True)
+
+
+class InitialSetupOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    initialized: bool
 
 
 class OnboardingInput(BaseModel):
@@ -221,6 +241,25 @@ class MembershipStateOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     membership_id: UUID
     state: Literal["active", "archived"]
+
+
+@router.get("/setup/status", response_model=SetupStatusOutput)
+def initial_setup_status(session: Database):
+    return services.setup_status(session)
+
+
+@router.post("/setup", status_code=201, response_model=InitialSetupOutput)
+def initial_setup(body: InitialSetupInput, request: Request, session: Database):
+    return services.web_setup_initial(
+        session,
+        settings=request.app.state.settings,
+        passwords=request.app.state.passwords,
+        email=body.email,
+        password=body.password.get_secret_value(),
+        password_confirmation=body.password_confirmation.get_secret_value(),
+        setup_token=body.setup_token.get_secret_value(),
+        source=request.client.host if request.client else "unknown",
+    )
 
 
 @router.get("/users", response_model=PlatformUserPageOutput)

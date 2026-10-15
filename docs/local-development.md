@@ -52,6 +52,11 @@ bootstrap/recovery procedures. See [company users and platform bootstrap](core-u
 Neither command runs during startup, and Codex did not run either command or migrate the development
 database for this checkpoint.
 
+CORE-SETUP-001 adds migration `0016_first_time_web_setup` and the optional first-time web flow.
+Review [the setup security and token procedure](core-setup-001-first-time-web-setup.md) before
+upgrading or enabling it. The migration preserves an existing completed administrator and does not
+reopen bootstrap.
+
 ## Start and check the API
 
 Use an available API port; 18080 was used for checkpoint verification because 8000 was occupied.

@@ -4,10 +4,11 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from editingtab_core.auth import repository as auth_repository
 from editingtab_core.auth.models import InvitationRole, OrganizationInvitation, PasswordCredential
-from editingtab_core.auth.security import Passwords, token_digest, validate_password
+from editingtab_core.auth.security import Passwords, SetupThrottled, token_digest, validate_password
 from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization.models import (
     MembershipRole,
@@ -24,6 +25,7 @@ from editingtab_core.authorization.policy import (
     StorageUnavailable,
 )
 from editingtab_core.authorization.services import authorize, transaction
+from editingtab_core.config import Settings
 from editingtab_core.identity import repository as identity_repository
 from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.models import Membership, Organization, User
@@ -57,6 +59,20 @@ class InvalidOnboarding(AccessError):
 class BootstrapClosed(AccessError):
     status = 409
     message = "Initial bootstrap is closed; use a separate controlled recovery process."
+
+
+class InvalidSetup(AccessError):
+    status = 422
+    message = "Invalid setup request."
+
+
+class SetupAuthenticationFailed(AccessError):
+    status = 401
+    message = "Setup authentication failed."
+
+
+class SetupUnavailable(StorageUnavailable):
+    message = "Initial setup unavailable."
 
 
 def _module(code, enabled=False):
@@ -540,13 +556,111 @@ def restore_platform_membership(session, *, actor_id, organization_id, membershi
         return {"membership_id": membership.id, "state": "active"}
 
 
-def bootstrap_initial(session, *, passwords: Passwords, password: str, display_name: str):
-    """Create the designated administrator once; repeat calls never change credentials."""
-    email = PLATFORM_ADMIN_EMAIL
+def setup_status(session):
+    """Expose only whether the one-time setup operation remains eligible."""
+    with transaction(session):
+        state = session.get(BootstrapState, 1)
+        if state is None:
+            raise SetupUnavailable()
+        any_grant = session.scalar(select(PlatformAdminGrant.id).limit(1))
+        required = not any((state.completed_at, state.administrator_user_id, any_grant))
+        return {"setup_required": required}
+
+
+def _consume_setup_attempt(session, *, settings: Settings, source: str):
+    """Persist setup throttles independently so rejected attempts still count."""
+    if session.in_transaction():
+        raise SetupUnavailable()
     try:
-        _, normalized = normalize_email(email)
+        with session.begin():
+            auth_repository.purge_expired_throttles(session)
+            allowed = auth_repository.consume_bucket(
+                session,
+                kind="w",
+                value=source,
+                limit=settings.setup_source_limit,
+                window=settings.setup_window_seconds,
+            )
+    except SQLAlchemyError:
+        raise SetupUnavailable() from None
+    if not allowed:
+        raise SetupThrottled("Try again later.")
+
+
+def _require_setup_token(settings: Settings, supplied_token: str):
+    configured = settings.setup_token_digest
+    if configured is None:
+        raise SetupUnavailable()
+    supplied_digest = token_digest(supplied_token)
+    # Always perform one fixed-length comparison, including malformed input.
+    candidate = supplied_digest if supplied_digest is not None else "0" * 64
+    if not secrets.compare_digest(candidate, configured.get_secret_value()):
+        raise SetupAuthenticationFailed()
+
+
+def web_setup_initial(
+    session,
+    *,
+    settings: Settings,
+    passwords: Passwords,
+    email: str,
+    password: str,
+    password_confirmation: str,
+    setup_token: str,
+    source: str,
+):
+    """Authenticate and perform strict one-time browser setup."""
+    _consume_setup_attempt(session, settings=settings, source=source)
+    _require_setup_token(settings, setup_token)
+    if password != password_confirmation:
+        raise InvalidSetup()
+    try:
+        validate_password(password)
+    except ValueError:
+        raise InvalidSetup() from None
+    _bootstrap_initial(
+        session,
+        passwords=passwords,
+        email=email,
+        password=password,
+        display_name="The Editing Tab Platform Administrator",
+        strict=True,
+        allow_existing_user=False,
+        action="operator.web_setup",
+    )
+    return {"initialized": True}
+
+
+def bootstrap_initial(session, *, passwords: Passwords, password: str, display_name: str):
+    """Create the legacy designated administrator once without changing repeat credentials."""
+    return _bootstrap_initial(
+        session,
+        passwords=passwords,
+        email=PLATFORM_ADMIN_EMAIL,
+        password=password,
+        display_name=display_name,
+        strict=False,
+        allow_existing_user=True,
+        action="operator.bootstrap",
+    )
+
+
+def _bootstrap_initial(
+    session,
+    *,
+    passwords: Passwords,
+    email: str,
+    password: str,
+    display_name: str,
+    strict: bool,
+    allow_existing_user: bool,
+    action: str,
+):
+    """Create one administrator and close setup in the same locked transaction."""
+    try:
+        display_email, normalized = normalize_email(email)
     except InvalidIdentity:
-        raise InvalidOnboarding() from None
+        raise InvalidSetup() from None
     with transaction(session):
         state = session.scalar(
             select(BootstrapState)
@@ -572,28 +686,34 @@ def bootstrap_initial(session, *, passwords: Passwords, password: str, display_n
         any_grant = session.scalar(select(PlatformAdminGrant.id).limit(1))
         if state.completed_at is not None:
             if (
-                existing_user is not None
+                not strict
+                and existing_user is not None
                 and existing_user.is_active
                 and existing_user.deleted_at is None
                 and existing_grant is not None
                 and existing_grant.revoked_at is None
+                and state.administrator_user_id in {None, existing_user.id}
             ):
                 return existing_grant.id
             raise BootstrapClosed()
-        if any_grant is not None:
+        if any_grant is not None or state.administrator_user_id is not None:
+            raise BootstrapClosed()
+        if existing_user is not None and not allow_existing_user:
             raise BootstrapClosed()
         if existing_user is not None and (
             not existing_user.is_active or existing_user.deleted_at is not None
         ):
-            raise InvalidOnboarding()
+            if allow_existing_user:
+                raise InvalidOnboarding()
+            raise InvalidSetup()
         if existing_user is None:
             validate_password(password)
             try:
                 name = clean_name(display_name)
             except InvalidIdentity:
-                raise InvalidOnboarding() from None
+                raise InvalidSetup() from None
             existing_user = User(
-                email=normalized,
+                email=display_email,
                 normalized_email=normalized,
                 display_name=name,
             )
@@ -612,11 +732,12 @@ def bootstrap_initial(session, *, passwords: Passwords, password: str, display_n
         session.add(grant)
         session.flush()
         state.completed_at = datetime.now(UTC)
+        state.administrator_user_id = existing_user.id
         _audit(
             session,
             actor_id=None,
             organization_id=None,
-            action="operator.bootstrap",
+            action=action,
             target_id=grant.id,
             before={},
             after={"user_id": str(existing_user.id), "active": True},
@@ -627,7 +748,6 @@ def bootstrap_initial(session, *, passwords: Passwords, password: str, display_n
 def recover_platform_admin(session, *, passwords: Passwords, password: str):
     """Explicit operator recovery; never used by startup or tenant-facing HTTP."""
     validate_password(password)
-    _, normalized = normalize_email(PLATFORM_ADMIN_EMAIL)
     with transaction(session):
         state = session.scalar(
             select(BootstrapState)
@@ -637,12 +757,22 @@ def recover_platform_admin(session, *, passwords: Passwords, password: str):
         )
         if state is None or state.completed_at is None:
             raise BootstrapClosed()
-        user = session.scalar(
-            select(User)
-            .where(User.normalized_email == normalized)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        if state.administrator_user_id is not None:
+            user = session.get(
+                User,
+                state.administrator_user_id,
+                with_for_update=True,
+                populate_existing=True,
+            )
+        else:
+            # Backward-compatible fallback for an inconsistent pre-0016 installation.
+            _, normalized = normalize_email(PLATFORM_ADMIN_EMAIL)
+            user = session.scalar(
+                select(User)
+                .where(User.normalized_email == normalized)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         if user is None or not user.is_active or user.deleted_at is not None:
             raise InvalidOnboarding()
         credential = session.get(PasswordCredential, user.id, with_for_update=True)

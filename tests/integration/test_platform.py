@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -15,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from editingtab_core.app import create_app
 from editingtab_core.auth.models import InvitationRole, OrganizationInvitation, PasswordCredential
 from editingtab_core.auth.provision import provision_user
-from editingtab_core.auth.security import Passwords
+from editingtab_core.auth.security import Passwords, SetupThrottled, token_digest
 from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization import services as tenant
 from editingtab_core.authorization.http import Actor, Database
@@ -839,6 +840,162 @@ def test_fresh_bootstrap_is_idempotent_and_has_zero_tenant_memberships(identity_
         assert repeated == grant
         assert identity_session.get(PasswordCredential, row.id).password_hash == original_hash
         assert row.display_name == "Platform Administrator"
+
+
+def test_web_setup_selects_email_closes_once_and_preserves_password(
+    identity_session, integration_settings
+):
+    passwords = Passwords()
+    token = "s" * 43
+    settings = integration_settings.model_copy(
+        update={"setup_token_digest": SecretStr(token_digest(token))}
+    )
+    result = services.web_setup_initial(
+        identity_session,
+        settings=settings,
+        passwords=passwords,
+        email="Chosen.Admin@example.test",
+        password="synthetic selected administrator password",
+        password_confirmation="synthetic selected administrator password",
+        setup_token=token,
+        source="198.51.100.10",
+    )
+    assert result == {"initialized": True}
+    assert services.setup_status(identity_session) == {"setup_required": False}
+    with identity_session.begin():
+        user = identity_session.scalar(
+            select(User).where(User.normalized_email == "chosen.admin@example.test")
+        )
+        state = identity_session.get(BootstrapState, 1)
+        grant = identity_session.scalar(
+            select(PlatformAdminGrant).where(PlatformAdminGrant.user_id == user.id)
+        )
+        credential = identity_session.get(PasswordCredential, user.id)
+        original_hash = credential.password_hash
+        assert user.email == "Chosen.Admin@example.test"
+        assert state.completed_at is not None
+        assert state.administrator_user_id == user.id
+        assert grant.revoked_at is None
+        assert passwords.verify(
+            credential.password_hash, "synthetic selected administrator password"
+        )
+        assert identity_session.scalar(select(func.count()).select_from(Membership)) == 0
+        audit = identity_session.scalar(
+            select(PlatformAudit).where(PlatformAudit.action == "operator.web_setup")
+        )
+        assert audit.target_id == grant.id and audit.actor_id is None
+
+    with pytest.raises(services.BootstrapClosed):
+        services.web_setup_initial(
+            identity_session,
+            settings=settings,
+            passwords=passwords,
+            email="other@example.test",
+            password="different administrator password",
+            password_confirmation="different administrator password",
+            setup_token=token,
+            source="198.51.100.10",
+        )
+    with identity_session.begin():
+        assert identity_session.get(PasswordCredential, user.id).password_hash == original_hash
+        assert identity_session.scalar(select(func.count()).select_from(PlatformAdminGrant)) == 1
+
+
+def test_web_setup_http_contract(identity_session, migration_connection, integration_settings):
+    token = "h" * 43
+    settings = integration_settings.model_copy(
+        update={
+            "auth_allowed_origins": (ORIGIN,),
+            "setup_token_digest": SecretStr(token_digest(token)),
+        }
+    )
+    app = create_app(settings)
+    body = {
+        "email": "http-selected@example.test",
+        "password": "synthetic http setup password",
+        "password_confirmation": "synthetic http setup password",
+        "setup_token": token,
+    }
+    with TestClient(app, base_url=ORIGIN) as client:
+        app.state.session_factory = sessionmaker(
+            bind=migration_connection,
+            join_transaction_mode="create_savepoint",
+            expire_on_commit=False,
+        )
+        status = client.get("/platform/setup/status", headers={"Accept": "application/json"})
+        denied = client.post(
+            "/platform/setup",
+            headers={"Origin": ORIGIN, "Accept": "application/json"},
+            json={**body, "setup_token": "z" * 43},
+        )
+        created = client.post(
+            "/platform/setup",
+            headers={"Origin": ORIGIN, "Accept": "application/json"},
+            json=body,
+        )
+        repeated = client.post(
+            "/platform/setup",
+            headers={"Origin": ORIGIN, "Accept": "application/json"},
+            json=body,
+        )
+        closed = client.get("/platform/setup/status", headers={"Accept": "application/json"})
+    assert status.json() == {"setup_required": True}
+    assert denied.status_code == 401
+    assert denied.json() == {"detail": "Setup authentication failed."}
+    assert created.status_code == 201 and created.json() == {"initialized": True}
+    assert "set-cookie" not in created.headers
+    assert repeated.status_code == 409
+    assert closed.json() == {"setup_required": False}
+
+
+def test_web_setup_rejects_token_mismatch_and_rate_limits(identity_session, integration_settings):
+    token = "t" * 43
+    settings = integration_settings.model_copy(
+        update={
+            "setup_token_digest": SecretStr(token_digest(token)),
+            "setup_source_limit": 2,
+        }
+    )
+    values = dict(
+        settings=settings,
+        passwords=Passwords(),
+        email="admin@example.test",
+        password="synthetic web setup password",
+        password_confirmation="synthetic web setup password",
+        setup_token="x" * 43,
+        source="198.51.100.20",
+    )
+    for _ in range(2):
+        with pytest.raises(services.SetupAuthenticationFailed):
+            services.web_setup_initial(identity_session, **values)
+    with pytest.raises(SetupThrottled):
+        services.web_setup_initial(identity_session, **values)
+    assert services.setup_status(identity_session) == {"setup_required": True}
+
+
+def test_recovery_uses_web_selected_administrator(identity_session, integration_settings):
+    token = "r" * 43
+    settings = integration_settings.model_copy(
+        update={"setup_token_digest": SecretStr(token_digest(token))}
+    )
+    services.web_setup_initial(
+        identity_session,
+        settings=settings,
+        passwords=Passwords(),
+        email="recover-selected@example.test",
+        password="synthetic selected initial password",
+        password_confirmation="synthetic selected initial password",
+        setup_token=token,
+        source="198.51.100.30",
+    )
+    recovered = "synthetic selected recovery password"
+    services.recover_platform_admin(identity_session, passwords=Passwords(), password=recovered)
+    with identity_session.begin():
+        user = identity_session.scalar(
+            select(User).where(User.normalized_email == "recover-selected@example.test")
+        )
+        credential = identity_session.get(PasswordCredential, user.id)
+        assert Passwords().verify(credential.password_hash, recovered)
 
 
 def test_explicit_platform_recovery_restores_grant_and_resets_credential(

@@ -80,6 +80,25 @@ def test_environment_prefix(monkeypatch):
     assert settings.environment == "test"
 
 
+def test_setup_digest_is_validated_and_excluded_from_serialization():
+    digest = "a" * 64
+    settings = Settings(_env_file=None, db_password="unit-only", setup_token_digest=digest)
+    assert settings.setup_token_digest.get_secret_value() == digest
+    assert digest not in repr(settings)
+    assert "setup_token_digest" not in settings.model_dump()
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, db_password="unit-only", setup_token_digest="not-a-digest")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("setup_window_seconds", 59), ("setup_window_seconds", 3601), ("setup_source_limit", 0)],
+)
+def test_setup_rate_limit_configuration_bounds(field, value):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, db_password="unit-only", **{field: value})
+
+
 def test_validation_does_not_echo_input(monkeypatch):
     sentinel = "credential-like-invalid-value"
     monkeypatch.setenv("CORE_DB_PASSWORD", sentinel)

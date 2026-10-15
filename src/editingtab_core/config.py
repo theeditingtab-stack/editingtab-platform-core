@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     auth_invitation_seconds: int = Field(default=604800, ge=300, le=2592000)
     auth_reauthentication_seconds: int = Field(default=900, ge=60, le=3600)
     auth_password_reset_seconds: int = Field(default=1800, ge=300, le=86400)
+    setup_token_digest: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    setup_window_seconds: int = Field(default=300, ge=60, le=3600)
+    setup_source_limit: int = Field(default=5, ge=1, le=20)
 
     booking_service_current_digest: SecretStr | None = Field(default=None, repr=False, exclude=True)
     booking_service_previous_digest: SecretStr | None = Field(
@@ -49,7 +52,11 @@ class Settings(BaseSettings):
     )
     booking_service_private_networks: tuple[str, ...] = ()
 
-    @field_validator("booking_service_current_digest", "booking_service_previous_digest")
+    @field_validator(
+        "booking_service_current_digest",
+        "booking_service_previous_digest",
+        "setup_token_digest",
+    )
     @classmethod
     def service_digest(cls, value):
         if value is not None and re.fullmatch(r"[0-9a-f]{64}", value.get_secret_value()) is None:

@@ -200,7 +200,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0015_platform_owner_lifecycle"
+    assert expected_head == "0016_first_time_web_setup"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -242,7 +242,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0015_platform_owner_lifecycle"
+        == "0016_first_time_web_setup"
     )
 
 
@@ -402,7 +402,52 @@ def test_0013_downgrade_rejects_populated_designation_state(
         nested.rollback()
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0015_platform_owner_lifecycle"
+        == "0016_first_time_web_setup"
+    )
+
+
+def test_0016_backfills_existing_completed_administrator_without_changing_identity(
+    migration_config, migration_connection
+):
+    command.upgrade(migration_config, "0015_platform_owner_lifecycle")
+    user_id = uuid4()
+    grant_id = uuid4()
+    migration_connection.execute(
+        text(
+            "INSERT INTO core_users "
+            "(id, email, normalized_email, display_name) "
+            "VALUES (:id, 'existing-admin@example.test', "
+            "'existing-admin@example.test', 'Existing Administrator')"
+        ),
+        {"id": user_id},
+    )
+    migration_connection.execute(
+        text("INSERT INTO core_platform_admin_grants (id, user_id) VALUES (:id, :user_id)"),
+        {"id": grant_id, "user_id": user_id},
+    )
+    migration_connection.execute(
+        text("UPDATE core_platform_bootstrap SET completed_at = clock_timestamp() WHERE id = 1")
+    )
+
+    command.upgrade(migration_config, "head")
+
+    row = migration_connection.execute(
+        text("SELECT completed_at, administrator_user_id FROM core_platform_bootstrap WHERE id = 1")
+    ).one()
+    assert row.completed_at is not None
+    assert row.administrator_user_id == user_id
+    assert (
+        migration_connection.execute(
+            text("SELECT email FROM core_users WHERE id = :id"), {"id": user_id}
+        ).scalar_one()
+        == "existing-admin@example.test"
+    )
+    assert (
+        migration_connection.execute(
+            text("SELECT user_id FROM core_platform_admin_grants WHERE id = :id"),
+            {"id": grant_id},
+        ).scalar_one()
+        == user_id
     )
 
 

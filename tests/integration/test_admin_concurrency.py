@@ -9,12 +9,13 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from pydantic import SecretStr
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from editingtab_core.auth import services as auth_services
 from editingtab_core.auth.provision import provision_user
-from editingtab_core.auth.security import AuthenticationError, Passwords
+from editingtab_core.auth.security import AuthenticationError, Passwords, token_digest
 from editingtab_core.authorization import repository, services
 from editingtab_core.authorization.bootstrap import bootstrap
 from editingtab_core.authorization.models import MembershipRole, Role, RolePermission
@@ -332,6 +333,77 @@ def test_concurrent_initial_platform_bootstraps_create_exactly_one_grant(
                 text("SELECT completed_at IS NOT NULL FROM core_platform_bootstrap WHERE id = 1")
             )
             is True
+        )
+
+
+def test_concurrent_web_setups_allow_exactly_one_success(
+    integration_engine, integration_settings, shared_schema
+):
+    from editingtab_core.platform import services as platform
+
+    token = "w" * 43
+    settings = integration_settings.model_copy(
+        update={"setup_token_digest": SecretStr(token_digest(token))}
+    )
+    pids = Queue()
+
+    def attempt(index):
+        with scoped_connection(integration_engine, shared_schema) as connection:
+            pid = connection.scalar(text("SELECT pg_backend_pid()"))
+            connection.commit()
+            pids.put(pid)
+            with Session(connection) as session:
+                try:
+                    platform.web_setup_initial(
+                        session,
+                        settings=settings,
+                        passwords=Passwords(),
+                        email=f"initial-{index}@example.test",
+                        password="synthetic concurrent web setup password",
+                        password_confirmation="synthetic concurrent web setup password",
+                        setup_token=token,
+                        source=f"198.51.100.{index}",
+                    )
+                    return "created"
+                except platform.BootstrapClosed:
+                    return "closed"
+
+    with scoped_connection(integration_engine, shared_schema) as gate:
+        gate.execute(text("SELECT id FROM core_platform_bootstrap WHERE id = 1 FOR UPDATE"))
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(attempt, index) for index in (1, 2)]
+            try:
+                worker_pids = [pids.get(timeout=3), pids.get(timeout=3)]
+                deadline = time.monotonic() + 5
+                with integration_engine.connect() as observer:
+                    while True:
+                        waiting = [
+                            observer.scalar(
+                                text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"),
+                                {"pid": pid},
+                            )
+                            for pid in worker_pids
+                        ]
+                        if all(waiting):
+                            break
+                        assert time.monotonic() < deadline, (
+                            "Web setup workers did not reach the bootstrap lock"
+                        )
+                        time.sleep(0.01)
+            finally:
+                gate.rollback()
+            assert sorted(future.result(timeout=15) for future in futures) == [
+                "closed",
+                "created",
+            ]
+    with scoped_connection(integration_engine, shared_schema) as connection:
+        assert connection.scalar(text("SELECT count(*) FROM core_users")) == 1
+        assert connection.scalar(text("SELECT count(*) FROM core_platform_admin_grants")) == 1
+        assert (
+            connection.scalar(
+                text("SELECT count(*) FROM core_platform_audit WHERE action = 'operator.web_setup'")
+            )
+            == 1
         )
 
 

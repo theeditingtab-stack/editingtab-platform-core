@@ -18,6 +18,7 @@ from editingtab_core.auth.security import (
     AuthenticationUnavailable,
     LoginThrottled,
     Passwords,
+    SetupThrottled,
 )
 from editingtab_core.authorization.http import router as organization_router
 from editingtab_core.authorization.policy import AccessError
@@ -33,7 +34,7 @@ from editingtab_core.internal.booking import router as internal_router
 from editingtab_core.platform.http import router as platform_router
 from editingtab_core.platform.http import tenant_router
 
-SCHEMA_HEAD = "0015_platform_owner_lifecycle"
+SCHEMA_HEAD = "0016_first_time_web_setup"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -93,6 +94,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=429,
             content={"detail": "Try again later."},
             headers={"Retry-After": str(settings.auth_window_seconds)},
+        )
+
+    @app.exception_handler(SetupThrottled)
+    async def setup_throttled(request, error):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Try again later."},
+            headers={"Retry-After": str(settings.setup_window_seconds)},
         )
 
     @app.exception_handler(RequestValidationError)
