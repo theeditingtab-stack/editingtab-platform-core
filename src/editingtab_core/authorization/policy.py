@@ -16,6 +16,8 @@ BOOKING_PERMISSIONS = BOOKING_INVENTORY_PERMISSIONS | frozenset(
 )
 OWNER_PERMISSIONS = frozenset(
     {
+        "core.branding.read",
+        "core.branding.manage",
         "core.organization.read",
         "core.members.read",
         "core.members.manage",
@@ -31,6 +33,8 @@ ROLE_UPDATE = "core.roles.update"
 ROLE_ARCHIVE = "core.roles.archive"
 ROLE_ASSIGN = "core.roles.assign"
 MEMBER_MANAGE = "core.members.manage"
+BRANDING_READ = "core.branding.read"
+BRANDING_MANAGE = "core.branding.manage"
 ADMINISTRATOR_PERMISSIONS = frozenset(
     {"core.roles.read", ROLE_CREATE, ROLE_UPDATE, ROLE_ARCHIVE, ROLE_ASSIGN}
 )

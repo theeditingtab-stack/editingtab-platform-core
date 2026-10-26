@@ -228,6 +228,12 @@ def test_context_is_stable_scoped_and_contains_only_effective_current_state(clie
             "core.organization.read",
         ],
         "enabled_modules": ["booking"],
+        "branding": {
+            "primary_color": "#183C2B",
+            "accent_color": "#D4A853",
+            "version": 1,
+            "has_logo": False,
+        },
     }
     assert zebra == {
         "organization_id": str(context_env.organizations["zebra"]),
@@ -239,6 +245,12 @@ def test_context_is_stable_scoped_and_contains_only_effective_current_state(clie
         "effective_grant_authority": [],
         "effective_permission_management_authority": [],
         "enabled_modules": [],
+        "branding": {
+            "primary_color": "#183C2B",
+            "accent_color": "#D4A853",
+            "version": 1,
+            "has_logo": False,
+        },
     }
     serialized = first.text.lower()
     for forbidden in (

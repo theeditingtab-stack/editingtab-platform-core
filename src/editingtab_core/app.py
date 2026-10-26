@@ -22,6 +22,9 @@ from editingtab_core.auth.security import (
 )
 from editingtab_core.authorization.http import router as organization_router
 from editingtab_core.authorization.policy import AccessError
+from editingtab_core.branding.http import platform_router as branding_platform_router
+from editingtab_core.branding.http import tenant_router as branding_tenant_router
+from editingtab_core.branding.storage import LocalBrandingStorage
 from editingtab_core.config import Settings, load_settings
 from editingtab_core.database import build_engine, get_session
 from editingtab_core.internal.booking import (
@@ -34,7 +37,7 @@ from editingtab_core.internal.booking import router as internal_router
 from editingtab_core.platform.http import router as platform_router
 from editingtab_core.platform.http import tenant_router
 
-SCHEMA_HEAD = "0016_first_time_web_setup"
+SCHEMA_HEAD = "0017_branding_profiles"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -45,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.passwords = await run_in_threadpool(Passwords)
         engine = build_engine(settings)
         app.state.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        app.state.branding_storage = LocalBrandingStorage(settings.branding_storage_path)
         try:
             yield
         finally:
@@ -57,7 +61,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(invitation_router)
     app.include_router(organization_router)
+    app.include_router(branding_tenant_router)
     app.include_router(platform_router)
+    app.include_router(branding_platform_router)
     app.include_router(tenant_router)
     app.include_router(internal_router)
     app.add_middleware(BookingRequestGuard, settings=settings)
@@ -66,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=list(settings.auth_allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "If-Match"],
     )
 
     @app.exception_handler(AuthorizationFailure)

@@ -2,6 +2,7 @@
 
 import ipaddress
 import re
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     db_password: SecretStr | None = Field(default=None, repr=False, exclude=True)
     database_dsn: SecretStr | None = Field(default=None, repr=False, exclude=True)
     db_connect_timeout: int = Field(default=3, ge=2, le=10)
+    branding_storage_path: Path = Path(".core-branding")
 
     auth_allowed_origins: tuple[str, ...] = ()
     auth_session_seconds: int = Field(default=28800, ge=60, le=604800)
@@ -134,6 +136,13 @@ class Settings(BaseSettings):
     def nonblank(cls, value: str) -> str:
         if not value.strip() or any(ord(char) < 32 for char in value):
             raise ValueError("Must be nonblank and contain no control characters")
+        return value
+
+    @field_validator("branding_storage_path")
+    @classmethod
+    def safe_branding_storage_path(cls, value: Path) -> Path:
+        if not str(value).strip() or "\x00" in str(value):
+            raise ValueError("Branding storage path must be nonblank")
         return value
 
     @field_validator("db_password")

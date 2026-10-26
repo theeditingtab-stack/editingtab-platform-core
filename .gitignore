@@ -39,6 +39,7 @@ coverage/
 lcov.info
 backups/
 dumps/
+.core-branding/
 *.dump
 *.backup
 *.sql

@@ -1,6 +1,7 @@
 """Validate production configuration without printing values or opening connections."""
 
 import sys
+from pathlib import Path
 
 from editingtab_core.config import ConfigurationError, load_settings
 
@@ -16,6 +17,10 @@ def main() -> int:
             raise ConfigurationError("Configure the Booking service credential digest.")
         if not settings.booking_service_private_networks:
             raise ConfigurationError("Configure the private Booking service network.")
+        if not settings.branding_storage_path.is_absolute():
+            raise ConfigurationError("Configure an absolute persistent branding storage path.")
+        if settings.branding_storage_path == Path(settings.branding_storage_path.anchor):
+            raise ConfigurationError("Branding storage path must not be a filesystem root.")
     except ConfigurationError as error:
         print(f"Production configuration invalid: {error}", file=sys.stderr)
         return 1

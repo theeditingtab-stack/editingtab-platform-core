@@ -30,6 +30,8 @@ from editingtab_core.authorization import repository as authorization_repository
 from editingtab_core.authorization import services as authorization_services
 from editingtab_core.authorization.models import Role
 from editingtab_core.authorization.policy import MEMBER_MANAGE, AccessError, Conflict
+from editingtab_core.branding.models import OrganizationBranding
+from editingtab_core.branding.services import DEFAULT_ACCENT_COLOR, DEFAULT_PRIMARY_COLOR
 from editingtab_core.config import Settings
 from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.models import Membership, User
@@ -124,6 +126,26 @@ def current_user(session: Session, token: str | None) -> Profile:
     return profile
 
 
+def update_profile(session: Session, token: str | None, *, display_name: str) -> Profile:
+    try:
+        value = clean_name(display_name)
+    except InvalidIdentity:
+        raise AuthenticationError("Invalid profile details.") from None
+    with transaction(session):
+        user, _ = _session_identity(session, token, lock=True)
+        before = user.display_name
+        if before != value:
+            user.display_name = value
+            repository.audit(
+                session,
+                action="profile.display_name.changed",
+                actor_id=user.id,
+                target_id=user.id,
+                details={"before": before, "after": value},
+            )
+        return Profile(user.id, user.email, user.display_name)
+
+
 def access_context(session: Session, token: str | None):
     """Build current authorization context from database state, never session claims."""
     with transaction(session):
@@ -132,6 +154,7 @@ def access_context(session: Session, token: str | None):
         for membership, organization in repository.active_organization_memberships(
             session, user.id
         ):
+            branding = session.get(OrganizationBranding, organization.id)
             organizations.append(
                 {
                     "organization_id": organization.id,
@@ -162,6 +185,14 @@ def access_context(session: Session, token: str | None):
                     "enabled_modules": repository.enabled_modules(
                         session, organization.id, SUPPORTED_MODULES
                     ),
+                    "branding": {
+                        "primary_color": (
+                            branding.primary_color if branding else DEFAULT_PRIMARY_COLOR
+                        ),
+                        "accent_color": branding.accent_color if branding else DEFAULT_ACCENT_COLOR,
+                        "version": branding.version if branding else 1,
+                        "has_logo": bool(branding and branding.logo_asset_id),
+                    },
                 }
             )
         return {

@@ -21,7 +21,7 @@ from editingtab_core.authorization.models import (
     Role,
     RolePermission,
 )
-from editingtab_core.authorization.policy import BOOKING_PERMISSIONS
+from editingtab_core.authorization.policy import BOOKING_PERMISSIONS, BRANDING_MANAGE, BRANDING_READ
 from editingtab_core.database import get_session
 from editingtab_core.identity import services as identity
 from editingtab_core.identity.models import Base, Membership, User
@@ -86,7 +86,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                 )
             )
     command.upgrade(migration_config, "0006_booking_authorization")
-    owned_id, role_id, booking_role_id = org_id, uuid4(), uuid4()
+    owned_id, role_id, booking_role_id, owner_role_id = org_id, uuid4(), uuid4(), uuid4()
     connection.execute(
         text(
             "INSERT INTO core_roles "
@@ -102,6 +102,13 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "VALUES (:id, :org, 'Preserved', 'preserved')"
         ),
         {"id": role_id, "org": org_id},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO core_roles (id, organization_id, name, normalized_name) "
+            "VALUES (:id, :org, 'Organization owner', 'organization owner')"
+        ),
+        {"id": owner_role_id, "org": org_id},
     )
     connection.execute(
         text(
@@ -180,6 +187,18 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
                 )
             ).all()
         ) == dict.fromkeys(BOOKING_PERMISSIONS, False)
+        owner_branding_grants = dict(
+            session.execute(
+                select(RolePermission.code, RolePermission.can_grant).where(
+                    RolePermission.role_id == owner_role_id,
+                    RolePermission.code.in_([BRANDING_READ, BRANDING_MANAGE]),
+                )
+            ).all()
+        )
+        assert owner_branding_grants == {
+            BRANDING_READ: True,
+            BRANDING_MANAGE: True,
+        }
         assert session.scalars(select(BookingPermissionManagerDesignation)).all() == []
         assert session.scalars(select(BookingPermissionManagerScope)).all() == []
         assert (
@@ -191,7 +210,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
         assert session.get(Role, booking_role_id).name == "Booking administrator"
         assert authorization_repo.has_administrator(session, org_id)
         definitions = session.scalars(select(PermissionDefinition)).all()
-        assert len(definitions) == 20
+        assert len(definitions) == 22
         assert {row.code for row in definitions} >= preserved_codes
         assert session.get(User, existing_id).email == "preserved@example.test"
         assert session.get(Membership, member_id).user_id == existing_id
@@ -200,7 +219,7 @@ def test_real_migrations_upgrade_current_and_repeat(migration_config, migration_
             "synthetic preserved password",
         )
     expected_head = ScriptDirectory.from_config(migration_config).get_current_head()
-    assert expected_head == "0016_first_time_web_setup"
+    assert expected_head == "0017_branding_profiles"
     output = io.StringIO()
     migration_config.stdout = output
     command.current(migration_config, verbose=True)
@@ -242,7 +261,7 @@ def test_empty_0008_downgrade_and_reupgrade(migration_config, migration_connecti
     command.upgrade(migration_config, "head")
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0016_first_time_web_setup"
+        == "0017_branding_profiles"
     )
 
 
@@ -402,7 +421,7 @@ def test_0013_downgrade_rejects_populated_designation_state(
         nested.rollback()
     assert (
         migration_connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        == "0016_first_time_web_setup"
+        == "0017_branding_profiles"
     )
 
 

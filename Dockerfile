@@ -20,7 +20,9 @@ ENV PATH=/opt/core/.venv/bin:$PATH \
 WORKDIR /opt/core
 
 RUN groupadd --system core \
-    && useradd --system --gid core --home-dir /nonexistent --no-create-home core
+    && useradd --system --gid core --home-dir /nonexistent --no-create-home core \
+    && mkdir -p /opt/core/.core-branding \
+    && chown core:core /opt/core/.core-branding
 
 COPY --from=builder --chown=core:core /opt/core/.venv ./.venv
 COPY --chown=core:core alembic.ini ./

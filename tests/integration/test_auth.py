@@ -11,7 +11,12 @@ from sqlalchemy.orm import sessionmaker
 
 from editingtab_core.app import create_app
 from editingtab_core.auth import services
-from editingtab_core.auth.models import LoginSession, LoginThrottle, PasswordCredential
+from editingtab_core.auth.models import (
+    LoginSession,
+    LoginThrottle,
+    PasswordCredential,
+    SecurityAudit,
+)
 from editingtab_core.auth.provision import provision_user
 from editingtab_core.auth.security import COOKIE_NAME, CredentialConflict, Passwords, token_digest
 from editingtab_core.identity import services as identity
@@ -111,6 +116,42 @@ def test_real_login_hash_digest_cookie_profile_and_logout(
             assert len(rows) == 2
             assert all(row.token_digest not in {token, second_token} for row in rows)
             assert sum(row.revoked_at is not None for row in rows) == 1
+
+
+def test_authenticated_user_can_edit_only_own_global_display_name(
+    clients, user_id, identity_session
+):
+    with clients() as client:
+        assert login(client).status_code == 204
+        rejected = client.patch(
+            "/auth/me",
+            headers={"Origin": ORIGIN},
+            json={"display_name": "Changed", "email": "attacker@example.test"},
+        )
+        assert rejected.status_code == 422
+        updated = client.patch(
+            "/auth/me",
+            headers={"Origin": ORIGIN},
+            json={"display_name": "  Changed Name  "},
+        )
+        assert updated.status_code == 200
+        assert updated.json() == {
+            "id": str(user_id),
+            "email": EMAIL,
+            "display_name": "Changed Name",
+        }
+        context = client.get("/auth/context")
+        assert context.json()["user"]["display_name"] == "Changed Name"
+
+    with identity_session.begin():
+        user = identity_session.get(User, user_id)
+        audit = identity_session.scalar(
+            select(SecurityAudit).where(SecurityAudit.action == "profile.display_name.changed")
+        )
+        assert user.email == EMAIL
+        assert user.display_name == "Changed Name"
+        assert audit.actor_id == user_id
+        assert audit.target_id == user_id
 
 
 def test_unknown_wrong_and_credentialless_login_fail_identically(

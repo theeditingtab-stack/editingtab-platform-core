@@ -11,6 +11,8 @@ from editingtab_core.authorization.policy import (
 
 def test_owner_is_explicit_and_no_platform_permissions():
     expected = {
+        "core.branding.read",
+        "core.branding.manage",
         "core.organization.read",
         "core.members.read",
         "core.members.manage",

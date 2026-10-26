@@ -42,3 +42,14 @@ def test_production_validator_accepts_deployment_specific_https_origin():
 
     assert "https://demo.theeditingtab.com" not in validator
     assert "at least one exact HTTPS browser origin" in validator
+
+
+def test_branding_storage_is_dedicated_and_requires_a_persistent_production_path():
+    dockerfile = read("Dockerfile")
+    example = read(".env.example")
+    validator = read("scripts/validate-production-config.py")
+
+    assert "CORE_BRANDING_STORAGE_PATH" in example
+    assert "/opt/core/.core-branding" in dockerfile
+    assert "absolute persistent branding storage path" in validator
+    assert "filesystem root" in validator

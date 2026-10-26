@@ -15,6 +15,8 @@ from editingtab_core.database import get_session
 from editingtab_core.identity.errors import InvalidIdentity
 from editingtab_core.identity.normalization import clean_name, normalize_email
 
+MAX_LOGO_BYTES = 2 * 1024 * 1024
+
 router = APIRouter(prefix="/auth")
 invitation_router = APIRouter(prefix="/organizations")
 
@@ -49,6 +51,15 @@ class ContextOrganization(BaseModel):
     effective_grant_authority: list[str]
     effective_permission_management_authority: list[str]
     enabled_modules: list[str]
+    branding: "ContextBranding"
+
+
+class ContextBranding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    primary_color: str
+    accent_color: str
+    version: int
+    has_logo: bool
 
 
 class AccessContext(BaseModel):
@@ -85,6 +96,32 @@ def login(body: LoginInput, request: Request, session: Annotated[Session, Depend
 @router.get("/me")
 def me(request: Request, session: Annotated[Session, Depends(get_session)]) -> services.Profile:
     return services.current_user(session, request.cookies.get(COOKIE_NAME))
+
+
+class ProfileUpdateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("display_name")
+    @classmethod
+    def supported_display_name(cls, value):
+        try:
+            return clean_name(value)
+        except InvalidIdentity:
+            raise ValueError("unsupported display name") from None
+
+
+@router.patch("/me")
+def update_me(
+    body: ProfileUpdateInput,
+    request: Request,
+    session: Annotated[Session, Depends(get_session)],
+) -> services.Profile:
+    return services.update_profile(
+        session,
+        request.cookies.get(COOKIE_NAME),
+        display_name=body.display_name,
+    )
 
 
 @router.get("/context", response_model=AccessContext)
@@ -410,12 +447,17 @@ class AuthRequestGuard:
                     scope, receive, no_cache
                 )
             body = bytearray()
+            body_limit = (
+                MAX_LOGO_BYTES
+                if scope["method"] == "PUT" and scope["path"].endswith("/branding/logo")
+                else 16384
+            )
             while True:
                 message = await receive()
                 if message["type"] == "http.disconnect":
                     return
                 body.extend(message.get("body", b""))
-                if len(body) > 16384:
+                if len(body) > body_limit:
                     return await JSONResponse({"detail": "Request too large."}, status_code=413)(
                         scope, receive, no_cache
                     )
