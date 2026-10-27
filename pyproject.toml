@@ -36,7 +36,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --import-mode=importlib"
 markers = ["integration: requires explicit isolated PostgreSQL test configuration"]
 filterwarnings = ["error"]
 [tool.uv]
