@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +14,7 @@ from editingtab_core.database import build_engine
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def explicit_test_settings(values: dict[str, str]) -> Settings:
+def _explicit_test_settings(values: dict[str, str]) -> Settings:
     required = ("HOST", "PORT", "NAME", "USERNAME", "PASSWORD")
     if any(not values.get(f"CORE_TEST_DB_{key}") for key in required):
         raise ValueError("Integration tests require every explicit CORE_TEST_DB_ setting")
@@ -36,7 +37,12 @@ def explicit_test_settings(values: dict[str, str]) -> Settings:
 
 
 @pytest.fixture
-def integration_settings(pytestconfig):
+def explicit_test_settings() -> Callable[[dict[str, str]], Settings]:
+    return _explicit_test_settings
+
+
+@pytest.fixture
+def integration_settings(pytestconfig, explicit_test_settings):
     return explicit_test_settings(pytestconfig.core_test_environment)
 
 

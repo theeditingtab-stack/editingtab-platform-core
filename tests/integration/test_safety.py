@@ -1,7 +1,6 @@
 """Safety checks run as unit tests, without the integration marker."""
 
 import pytest
-from conftest import explicit_test_settings
 
 
 def valid_values():
@@ -14,7 +13,7 @@ def valid_values():
     }
 
 
-def test_missing_configuration_never_defaults():
+def test_missing_configuration_never_defaults(explicit_test_settings):
     with pytest.raises(ValueError, match="every explicit"):
         explicit_test_settings({})
 
@@ -28,7 +27,7 @@ def test_missing_configuration_never_defaults():
         ("CORE_TEST_DB_PORT", "15432"),
     ],
 )
-def test_refuses_unsafe_database(field, value):
+def test_refuses_unsafe_database(explicit_test_settings, field, value):
     values = valid_values()
     values[field] = value
     with pytest.raises(ValueError, match="non-isolated"):
